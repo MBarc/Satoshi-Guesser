@@ -53,7 +53,7 @@ Keys per day:          ~  3.5  x 10^9
 Time to cover 1%:      ~  10^65 years
 ```
 
-This is not a serious attack on Bitcoin. It's a demonstration of why the keyspace being astronomically large is the whole point. Random guessing at this scale is not a threat — it's the reason Bitcoin works.
+Nobody is cracking Bitcoin this way. The keyspace is that big on purpose, and running this is closer to confirming Bitcoin works than threatening it.
 
 ---
 
