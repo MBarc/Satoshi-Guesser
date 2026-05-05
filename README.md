@@ -1,109 +1,69 @@
 # Satoshi Guesser
 
-A long shot lottery that runs entirely on **GitHub Actions — free, 24/7, no server required.**
+Every spin generates a random Bitcoin private key and checks if it unlocks one of Satoshi's wallets. The odds are about 1 in 10⁷⁷. It runs free on GitHub Actions, 24 hours a day, across 20 parallel workers — no server, no cloud bill.
 
-Each spin generates a cryptographically random Bitcoin private key, derives its address using real secp256k1 elliptic curve math, and checks it against ~22,000 known Satoshi Nakamoto wallet addresses. If it ever hits, your Discord gets a private ping with the key. The odds are roughly 1 in 10⁷⁷ — but someone has to win.
-
----
-
-## Fork & Run in 3 Steps
-
-**No code changes needed. Just fork, add one secret, and go.**
-
-### 1. Fork this repo
-
-Click **Fork** in the top right. Make sure your fork is **public** (required for free unlimited GitHub Actions minutes).
-
-### 2. Add your Discord webhook as a secret
-
-- In your forked repo go to **Settings → Secrets and variables → Actions → New repository secret**
-- Name: `WEBHOOK_URL`
-- Value: your Discord webhook URL
-
-> Don't have one? In Discord: open a channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL.
-
-### 3. Trigger the workflow
-
-Go to **Actions → Satoshi Guesser → Run workflow → Run workflow.**
-
-That's it. 20 parallel workers spin up immediately and restart automatically every 6 hours.
+If it ever hits, your Discord gets a private message with the key. Nobody else sees it.
 
 ---
 
-## How It Works
+## Fork it and run it yourself
 
-```
-Random 256-bit number
-        ↓
-  secp256k1 point multiply  →  public key
-        ↓
-  SHA-256 → RIPEMD-160      →  hash160
-        ↓
-  Base58Check encode         →  Bitcoin address
-        ↓
-  Check against ~22,000 known Satoshi addresses
-        ↓
-  Match? → private Discord ping via webhook
-```
+You don't need to change any code. Fork the repo, add your Discord webhook URL as a secret, and kick off the workflow. That's the whole setup.
 
-Everything runs locally inside the GitHub runner — no network calls, no external APIs, pure math.
+**Keep your fork public.** GitHub only gives unlimited free Actions minutes to public repos. Private repos cap out at 2,000 minutes a month, which won't last a day.
+
+### Setting up the webhook secret
+
+In your forked repo, go to Settings, then Secrets and variables, then Actions. Create a new secret named `WEBHOOK_URL` and paste your Discord webhook URL as the value.
+
+If you don't have a Discord webhook yet: open any Discord channel, go to Edit Channel, find Integrations, and create a new webhook. Copy the URL it gives you.
+
+### Starting the workflow
+
+Go to the Actions tab, select "Satoshi Guesser," and click Run workflow. The 20 workers start up within a minute and re-trigger themselves every 6 hours automatically.
 
 ---
 
-## GitHub Actions Setup
+## What it actually does
 
-The workflow (`.github/workflows/guesser.yml`) runs **20 parallel jobs** on every trigger:
+Each worker pulls a cryptographically random 256-bit number and treats it as a Bitcoin private key. From that it derives a public key using secp256k1 elliptic curve math, runs it through SHA-256 and RIPEMD-160 to get a hash, then encodes that into a Bitcoin address. The address gets checked against a local list of ~22,000 addresses tied to the Patoshi mining pattern — the wallets widely attributed to Satoshi.
 
-- **Free**: public repos get unlimited GitHub Actions minutes
-- **Automatic**: re-triggers on a cron schedule every 6 hours
-- **Private results**: hits are sent only to your `WEBHOOK_URL` secret — nothing sensitive is logged publicly
-- **Throughput**: ~3–4 billion keys checked per day across all workers
-
-```
-┌─────────────────────────────────────────────┐
-│           GitHub Actions Runner              │
-│                                              │
-│  Worker 1  ──┐                              │
-│  Worker 2  ──┤                              │
-│  Worker 3  ──┤                              │
-│     ...    ──┼──► ~3-4 billion keys/day     │
-│  Worker 18 ──┤                              │
-│  Worker 19 ──┤                              │
-│  Worker 20 ──┘                              │
-└─────────────────────────────────────────────┘
-          ↓ (only on a hit)
-    Your Discord DM
-```
+All of this runs inside the GitHub runner. No external API calls, no blockchain queries. Just math.
 
 ---
 
-## Odds
+## Why GitHub Actions
 
-```
-Keyspace:          2²⁵⁶  ≈  1.16 × 10⁷⁷
-Keys/day:                 ≈  3.5  × 10⁹
-Expected wait:            ≈  10⁶⁵ years
-```
+Running 20 parallel jobs on GitHub's infrastructure costs nothing for public repos. Each job runs for just under 6 hours before the next scheduled trigger fires and spins up a fresh batch. Across all workers you get roughly 3 to 4 billion keys checked per day.
 
-This is a novelty project. It demonstrates that Bitcoin's security comes from the sheer size of the keyspace — not obscurity. Running this does not constitute an attack; randomly guessing a specific key is computationally indistinguishable from impossible.
+Hits go only to your webhook URL, which GitHub stores as an encrypted secret. Nothing useful gets written to the public logs.
 
 ---
 
-## Tech Stack
+## The odds
 
-- **Crypto**: [@noble/curves](https://github.com/paulmillr/noble-curves) + [@noble/hashes](https://github.com/paulmillr/noble-hashes) — audited, zero-dependency JS crypto
-- **Runtime**: Node.js 20 on GitHub-hosted Ubuntu runners
-- **Address data**: ~22,000 Patoshi-pattern coinbase addresses sourced from [SatoshiGuesser](https://github.com/Pathos0925/SatoshiGuesser)
-- **Notifications**: Discord webhook via GitHub Actions secret
+```
+Keyspace:       2^256  ~  1.16 x 10^77
+Keys per day:          ~  3.5  x 10^9
+Time to cover 1%:      ~  10^65 years
+```
+
+This is not a serious attack on Bitcoin. It's a demonstration of why the keyspace being astronomically large is the whole point. Random guessing at this scale is not a threat — it's the reason Bitcoin works.
 
 ---
 
-## Updating Your Webhook
+## Stack
 
-If you need to rotate your webhook URL:
+- [noble/curves](https://github.com/paulmillr/noble-curves) and [noble/hashes](https://github.com/paulmillr/noble-hashes) for the cryptography
+- Node.js 20 on GitHub-hosted Ubuntu runners
+- Address list sourced from [SatoshiGuesser](https://github.com/Pathos0925/SatoshiGuesser)
+
+---
+
+## Rotating your webhook
 
 ```
-gh secret set WEBHOOK_URL --body "YOUR_NEW_WEBHOOK_URL"
+gh secret set WEBHOOK_URL --body "your-new-url"
 ```
 
-Or update it manually in **Settings → Secrets and variables → Actions**.
+Or update it through Settings if you prefer the UI.
