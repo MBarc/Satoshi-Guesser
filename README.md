@@ -57,6 +57,10 @@ Nobody is cracking Bitcoin this way. The keyspace is that big on purpose, and ru
 
 ---
 
+## Inspiration
+
+This project was inspired by [SatoshiGuesser](https://github.com/Pathos0925/SatoshiGuesser) by Pathos0925, which does the same thing as a browser-based slot machine. The idea here was to take that concept and move it onto GitHub Actions so it runs continuously for free without needing a browser or a server open.
+
 ## Stack
 
 - [noble/curves](https://github.com/paulmillr/noble-curves) and [noble/hashes](https://github.com/paulmillr/noble-hashes) for the cryptography
