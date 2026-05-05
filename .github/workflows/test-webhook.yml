@@ -21,45 +21,33 @@ jobs:
         run: |
           node --input-type=module <<'EOF'
           import { toWIF, deriveAddresses } from './src/crypto.js';
+          import { notifyHit } from './src/notify.js';
 
           // Private key 1 — the lowest valid key, well-known in Bitcoin circles
           const privKey = new Uint8Array(32);
           privKey[31] = 1;
 
-          const { privKeyHex, addressUncompressed, addressCompressed } = deriveAddresses(privKey);
+          const { privKeyHex, addressUncompressed } = deriveAddresses(privKey);
           const wifCompressed = toWIF(privKey, true);
           const wifUncompressed = toWIF(privKey, false);
 
           const webhookUrl = process.env.WEBHOOK_URL;
           if (!webhookUrl) { console.error('WEBHOOK_URL secret not set'); process.exit(1); }
 
-          const body = {
-            content: '**[TEST] This is what a hit notification looks like**',
-            embeds: [{
-              color: 0xf7931a,
-              fields: [
-                { name: 'Address', value: `\`${addressUncompressed}\``, inline: false },
-                { name: 'WIF (compressed)', value: `\`${wifCompressed}\``, inline: false },
-                { name: 'WIF (uncompressed)', value: `\`${wifUncompressed}\``, inline: false },
-                { name: 'Raw hex', value: `\`${privKeyHex}\``, inline: false },
-              ],
-              footer: { text: 'This is a test using private key #1 — not a real hit.' },
-            }],
+          // Reuse notify.js but prefix the content to make clear it's a test
+          const originalFetch = globalThis.fetch;
+          globalThis.fetch = async (url, opts) => {
+            const body = JSON.parse(opts.body);
+            body.content = '[TEST] ' + body.content;
+            if (body.embeds?.[0]?.footer) {
+              body.embeds[0].footer.text = 'TEST MESSAGE — using private key #1, not a real hit. ' + body.embeds[0].footer.text;
+            }
+            opts.body = JSON.stringify(body);
+            return originalFetch(url, opts);
           };
 
-          const res = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-
-          if (res.ok) {
-            console.log('Test message sent successfully');
-          } else {
-            const text = await res.text();
-            console.error(`Failed: ${res.status} ${text}`);
-            process.exit(1);
-          }
+          await notifyHit(privKeyHex, addressUncompressed, wifUncompressed, wifCompressed);
+          console.log('Test message sent — check your Discord channel.');
           EOF
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}

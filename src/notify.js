@@ -7,19 +7,41 @@ export async function notifyHit(privKeyHex, address, wifUncompressed, wifCompres
 
   const isDiscord = webhookUrl.includes('discord.com') || webhookUrl.includes('discordapp.com');
 
+  const instructions = [
+    '1. Download Electrum from electrum.org',
+    '2. Create a new wallet → Import Bitcoin Addresses or Private Keys',
+    '3. Paste the WIF key below and confirm',
+    '4. Send the full balance to a new wallet you control',
+  ].join('\n');
+
   const body = isDiscord
     ? {
-        content: '**JACKPOT — Satoshi address matched!**',
+        content: '# JACKPOT — Satoshi address matched!',
         embeds: [
           {
             color: 0xf7931a,
             fields: [
-              { name: 'Address', value: `\`${address}\``, inline: false },
-              { name: 'WIF (compressed)', value: `\`${wifCompressed}\``, inline: false },
-              { name: 'WIF (uncompressed)', value: `\`${wifUncompressed}\``, inline: false },
-              { name: 'Raw hex', value: `\`${privKeyHex}\``, inline: false },
+              { name: 'Matched Address', value: `\`${address}\``, inline: false },
+              {
+                name: 'Private Key — Raw Hex (save this)',
+                value: `\`${privKeyHex}\``,
+                inline: false,
+              },
+              {
+                name: 'WIF Compressed (paste this into Electrum)',
+                value: `\`${wifCompressed}\``,
+                inline: false,
+              },
+              {
+                name: 'WIF Uncompressed (use if compressed fails)',
+                value: `\`${wifUncompressed}\``,
+                inline: false,
+              },
+              { name: 'What to do right now', value: instructions, inline: false },
             ],
-            footer: { text: 'Import a WIF key into Electrum: Wallet → Import Private Keys' },
+            footer: {
+              text: 'WIF = Wallet Import Format. It is your private key encoded for wallet software. Do not share it with anyone.',
+            },
           },
         ],
       }
