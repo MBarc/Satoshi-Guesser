@@ -1,0 +1,57 @@
+name: Satoshi Guesser
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Fires every 6 hours. Jobs run for 350 min (~5h50m), leaving a ~10 min gap.
+    - cron: '0 */6 * * *'
+
+jobs:
+  guess:
+    name: Worker ${{ matrix.worker }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package.json') }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Cache address list
+        id: addr-cache
+        uses: actions/cache@v4
+        with:
+          path: data/addresses.txt
+          # Re-fetch weekly in case the source list updates
+          key: satoshi-addresses-${{ github.run_id }}-week-${{ steps.week.outputs.week }}
+
+      - name: Get week number (for cache key)
+        id: week
+        run: echo "week=$(date +%V)" >> $GITHUB_OUTPUT
+
+      - name: Fetch Satoshi address list
+        if: steps.addr-cache.outputs.cache-hit != 'true'
+        run: node scripts/fetch-addresses.js
+
+      - name: Run guesser
+        run: node src/spin.js
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WORKER_ID: ${{ matrix.worker }}
+          DURATION_MINUTES: 350

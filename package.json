@@ -1,0 +1,13 @@
+{
+  "name": "satoshi-guesser",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "fetch": "node scripts/fetch-addresses.js",
+    "spin": "node src/spin.js"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.4.0"
+  }
+}
