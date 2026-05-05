@@ -1,0 +1,105 @@
+name: Daily Summary
+
+on:
+  schedule:
+    - cron: '0 23 * * *'  # 11pm UTC every day
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Collect last 24 hours of run totals
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p run-totals
+          cutoff=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Collecting artifacts since $cutoff"
+
+          gh api "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --paginate \
+            -q ".artifacts[] | select(.name | startswith(\"run-total-\")) | select(.created_at > \"$cutoff\") | .id" \
+            > artifact-ids.txt
+
+          echo "Found $(wc -l < artifact-ids.txt) runs in the last 24 hours"
+
+          while IFS= read -r id; do
+            gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > tmp.zip
+            unzip -o tmp.zip -d "run-totals/$id"
+          done < artifact-ids.txt
+
+      - name: Post daily summary to Discord
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync, readdirSync, statSync } from 'fs';
+          import { join } from 'path';
+
+          const TOTALS_DIR = './run-totals';
+          const STATS_PATH = './stats.json';
+          const SECONDS_PER_DAY = 86400;
+
+          // Sum all run totals from the last 24 hours
+          let dayTotal = 0;
+          let runCount = 0;
+
+          function walk(dir) {
+            for (const entry of readdirSync(dir)) {
+              const full = join(dir, entry);
+              if (statSync(full).isDirectory()) walk(full);
+              else if (entry === 'run-total.json') {
+                try {
+                  const { total } = JSON.parse(readFileSync(full, 'utf-8'));
+                  if (typeof total === 'number') { dayTotal += total; runCount++; }
+                } catch {}
+              }
+            }
+          }
+          try { walk(TOTALS_DIR); } catch {}
+
+          // Load all-time total
+          let allTime = 0;
+          try { allTime = JSON.parse(readFileSync(STATS_PATH, 'utf-8')).total ?? 0; } catch {}
+
+          const keysPerSec = Math.round(dayTotal / SECONDS_PER_DAY).toLocaleString('en-US');
+          const dayFormatted = dayTotal.toLocaleString('en-US');
+          const allTimeFormatted = allTime.toLocaleString('en-US');
+
+          const webhookUrl = process.env.WEBHOOK_URL;
+          if (!webhookUrl) { console.log('No webhook set — skipping Discord post'); process.exit(0); }
+
+          const body = {
+            embeds: [{
+              title: 'Daily Summary',
+              color: 0x5865f2,
+              fields: [
+                { name: 'Keys checked today', value: dayFormatted, inline: true },
+                { name: 'Avg keys/sec', value: keysPerSec, inline: true },
+                { name: 'Runs completed', value: String(runCount), inline: true },
+                { name: 'All-time total', value: allTimeFormatted, inline: false },
+              ],
+              footer: { text: 'No match found today. The search continues.' },
+              timestamp: new Date().toISOString(),
+            }],
+          };
+
+          const res = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+
+          console.log(res.ok ? `Summary posted (${dayFormatted} keys today)` : `Webhook failed: ${res.status}`);
+          EOF
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
