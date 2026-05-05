@@ -1,11 +1,10 @@
-export async function notifyHit(privKeyHex, address) {
+export async function notifyHit(privKeyHex, address, wifUncompressed, wifCompressed) {
   const webhookUrl = process.env.WEBHOOK_URL;
   if (!webhookUrl) {
     console.warn('WEBHOOK_URL not set — hit will not be reported privately');
     return;
   }
 
-  // Supports Discord webhooks and generic JSON webhooks
   const isDiscord = webhookUrl.includes('discord.com') || webhookUrl.includes('discordapp.com');
 
   const body = isDiscord
@@ -16,13 +15,15 @@ export async function notifyHit(privKeyHex, address) {
             color: 0xf7931a,
             fields: [
               { name: 'Address', value: `\`${address}\``, inline: false },
-              { name: 'Private Key (WIF hex)', value: `\`${privKeyHex}\``, inline: false },
+              { name: 'WIF (compressed)', value: `\`${wifCompressed}\``, inline: false },
+              { name: 'WIF (uncompressed)', value: `\`${wifUncompressed}\``, inline: false },
+              { name: 'Raw hex', value: `\`${privKeyHex}\``, inline: false },
             ],
-            footer: { text: 'Import the private key into a wallet immediately.' },
+            footer: { text: 'Import a WIF key into Electrum: Wallet → Import Private Keys' },
           },
         ],
       }
-    : { address, privKeyHex };
+    : { address, wifCompressed, wifUncompressed, privKeyHex };
 
   try {
     const res = await fetch(webhookUrl, {

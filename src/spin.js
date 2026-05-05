@@ -1,5 +1,5 @@
 import { writeFileSync } from 'fs';
-import { randomPrivKey, deriveAddresses } from './crypto.js';
+import { randomPrivKey, deriveAddresses, toWIF } from './crypto.js';
 import { isMatch, addressCount } from './checker.js';
 import { notifyHit } from './notify.js';
 
@@ -25,7 +25,9 @@ while (Date.now() - start < DURATION_MS) {
   if (hit) {
     console.log(`MATCH: ${hit}`);
     writeFileSync(`worker-${WORKER_ID}-count.txt`, String(count), 'utf-8');
-    await notifyHit(privKeyHex, hit);
+    const wifUncompressed = toWIF(privKey, false);
+    const wifCompressed = toWIF(privKey, true);
+    await notifyHit(privKeyHex, hit, wifUncompressed, wifCompressed);
     process.exit(0);
   }
 

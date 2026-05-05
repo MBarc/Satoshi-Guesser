@@ -46,6 +46,15 @@ export function randomPrivKey() {
   return secp256k1.utils.randomPrivateKey();
 }
 
+// WIF = Base58Check(0x80 + privkey [+ 0x01 if compressed])
+export function toWIF(privKey, compressed = true) {
+  const payload = new Uint8Array(compressed ? 34 : 33);
+  payload[0] = 0x80;
+  payload.set(privKey, 1);
+  if (compressed) payload[33] = 0x01;
+  return base58Check(payload);
+}
+
 // Returns both compressed and uncompressed addresses — Satoshi used uncompressed
 export function deriveAddresses(privKey) {
   const pubUncompressed = secp256k1.getPublicKey(privKey, false);
