@@ -33,17 +33,16 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Get week number (for cache key)
+        id: week
+        run: echo "week=$(date +%V)" >> $GITHUB_OUTPUT
+
       - name: Cache address list
         id: addr-cache
         uses: actions/cache@v4
         with:
           path: data/addresses.txt
-          # Re-fetch weekly in case the source list updates
-          key: satoshi-addresses-${{ github.run_id }}-week-${{ steps.week.outputs.week }}
-
-      - name: Get week number (for cache key)
-        id: week
-        run: echo "week=$(date +%V)" >> $GITHUB_OUTPUT
+          key: satoshi-addresses-week-${{ steps.week.outputs.week }}
 
       - name: Fetch Satoshi address list
         if: steps.addr-cache.outputs.cache-hit != 'true'
@@ -55,3 +54,40 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           WORKER_ID: ${{ matrix.worker }}
           DURATION_MINUTES: 350
+
+      - name: Upload worker count
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-count-${{ github.run_id }}-${{ matrix.worker }}
+          path: worker-${{ matrix.worker }}-count.txt
+          retention-days: 90
+
+  tally:
+    name: Tally run total
+    needs: guess
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all worker counts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: worker-count-${{ github.run_id }}-*
+          merge-multiple: true
+
+      - name: Sum counts and upload run total
+        run: |
+          total=0
+          for f in *-count.txt; do
+            [ -f "$f" ] && val=$(cat "$f") && total=$((total + val)) || true
+          done
+          echo "Run total: $total keys"
+          echo "{\"total\": $total, \"run_id\": \"${{ github.run_id }}\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > run-total.json
+
+      - name: Upload run total
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-total-${{ github.run_id }}
+          path: run-total.json
+          retention-days: 90

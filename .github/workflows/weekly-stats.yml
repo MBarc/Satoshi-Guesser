@@ -1,0 +1,61 @@
+name: Weekly Stats Update
+
+on:
+  schedule:
+    - cron: '0 12 * * 0'  # Every Sunday at noon UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download run-total artifacts since last update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p run-totals
+
+          # Read the timestamp of the last weekly update
+          last_updated=$(node -e "
+            try {
+              const s = JSON.parse(require('fs').readFileSync('stats.json','utf-8'));
+              console.log(s.lastUpdated ?? '1970-01-01T00:00:00Z');
+            } catch { console.log('1970-01-01T00:00:00Z'); }
+          ")
+          echo "Collecting artifacts created after: $last_updated"
+
+          # Fetch artifact IDs for all run-total-* artifacts created since last update
+          gh api "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --paginate \
+            -q ".artifacts[] | select(.name | startswith(\"run-total-\")) | select(.created_at > \"$last_updated\") | .id" \
+            > artifact-ids.txt
+
+          echo "Found $(wc -l < artifact-ids.txt) new run artifacts"
+
+          # Download and extract each artifact
+          while IFS= read -r artifact_id; do
+            gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > tmp.zip
+            unzip -o tmp.zip -d "run-totals/$artifact_id"
+          done < artifact-ids.txt
+
+      - name: Update stats and README
+        run: node scripts/update-readme.js
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md stats.json
+          git diff --staged --quiet || git commit -m "Weekly stats update"
+          git push

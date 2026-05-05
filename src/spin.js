@@ -1,3 +1,4 @@
+import { writeFileSync } from 'fs';
 import { randomPrivKey, deriveAddresses } from './crypto.js';
 import { isMatch, addressCount } from './checker.js';
 import { notifyHit } from './notify.js';
@@ -23,6 +24,7 @@ while (Date.now() - start < DURATION_MS) {
 
   if (hit) {
     console.log(`MATCH: ${hit}`);
+    writeFileSync(`worker-${WORKER_ID}-count.txt`, String(count), 'utf-8');
     await notifyHit(privKeyHex, hit);
     process.exit(0);
   }
@@ -39,3 +41,5 @@ while (Date.now() - start < DURATION_MS) {
 const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 const rate = Math.round(count / parseFloat(elapsed)).toLocaleString();
 console.log(`Worker ${WORKER_ID} done | ${count.toLocaleString()} keys in ${elapsed}s | avg ${rate} keys/sec`);
+
+writeFileSync(`worker-${WORKER_ID}-count.txt`, String(count), 'utf-8');
