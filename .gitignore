@@ -1,2 +1,4 @@
 node_modules/
 data/addresses.txt
+worker-*-count.txt
+run-totals/
