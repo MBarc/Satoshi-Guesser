@@ -42,6 +42,7 @@ Hits go only to your webhook URL, which GitHub stores as an encrypted secret. No
 Total keys checked: **0**
 Last updated never
 <!-- /STATS -->
+*Updates every Sunday via an automated commit.*
 
 ---
 
