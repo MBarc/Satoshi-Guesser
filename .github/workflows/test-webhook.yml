@@ -20,14 +20,14 @@ jobs:
       - name: Send test Discord message
         run: |
           node --input-type=module <<'EOF'
-          import { toWIF, deriveAddresses } from './src/crypto.js';
+          import { toWIF, deriveAddress } from './src/crypto.js';
           import { notifyHit } from './src/notify.js';
 
           // Private key 1 — the lowest valid key, well-known in Bitcoin circles
           const privKey = new Uint8Array(32);
           privKey[31] = 1;
 
-          const { privKeyHex, addressUncompressed } = deriveAddresses(privKey);
+          const { privKeyHex, address: addressUncompressed } = deriveAddress(privKey);
           const wifCompressed = toWIF(privKey, true);
           const wifUncompressed = toWIF(privKey, false);
 

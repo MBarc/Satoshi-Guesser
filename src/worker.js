@@ -1,5 +1,5 @@
 import { workerData, parentPort } from 'worker_threads';
-import { randomPrivKey, deriveAddresses, toWIF } from './crypto.js';
+import { randomPrivKey, deriveAddress, toWIF } from './crypto.js';
 import { isMatch } from './checker.js';
 
 const { durationMs, threadIndex } = workerData;
@@ -9,19 +9,13 @@ let count = 0;
 
 while (Date.now() - start < durationMs) {
   const privKey = randomPrivKey();
-  const { privKeyHex, addressUncompressed, addressCompressed } = deriveAddresses(privKey);
+  const { privKeyHex, address } = deriveAddress(privKey);
 
-  const hit = isMatch(addressUncompressed)
-    ? addressUncompressed
-    : isMatch(addressCompressed)
-    ? addressCompressed
-    : null;
-
-  if (hit) {
+  if (isMatch(address)) {
     parentPort.postMessage({
       type: 'hit',
       privKeyHex,
-      address: hit,
+      address,
       wifCompressed: toWIF(privKey, true),
       wifUncompressed: toWIF(privKey, false),
       count,

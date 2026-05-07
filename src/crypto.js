@@ -1,6 +1,11 @@
-import { secp256k1 } from '@noble/curves/secp256k1';
+import { createRequire } from 'module';
+import { randomBytes } from 'crypto';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
+
+// secp256k1 native package uses CJS exports — use createRequire to load it in ESM
+const require = createRequire(import.meta.url);
+const { publicKeyCreate, privateKeyVerify } = require('secp256k1');
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -43,7 +48,9 @@ function toAddress(h160) {
 }
 
 export function randomPrivKey() {
-  return secp256k1.utils.randomPrivateKey();
+  let key;
+  do { key = randomBytes(32); } while (!privateKeyVerify(key));
+  return key;
 }
 
 // WIF = Base58Check(0x80 + privkey [+ 0x01 if compressed])
@@ -55,14 +62,11 @@ export function toWIF(privKey, compressed = true) {
   return base58Check(payload);
 }
 
-// Returns both compressed and uncompressed addresses — Satoshi used uncompressed
-export function deriveAddresses(privKey) {
-  const pubUncompressed = secp256k1.getPublicKey(privKey, false);
-  const pubCompressed = secp256k1.getPublicKey(privKey, true);
-
+// Satoshi's addresses used uncompressed keys — only derive that one
+export function deriveAddress(privKey) {
+  const pubUncompressed = publicKeyCreate(privKey, false);
   return {
     privKeyHex: Buffer.from(privKey).toString('hex'),
-    addressUncompressed: toAddress(hash160(pubUncompressed)),
-    addressCompressed: toAddress(hash160(pubCompressed)),
+    address: toAddress(hash160(pubUncompressed)),
   };
 }
