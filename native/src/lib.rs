@@ -53,6 +53,17 @@ pub fn search(
     duration_ms: u32,
     batch_size: u32,
 ) -> SearchResult {
+    // Runtime check: confirm our C wrapper is linked and the FFI symbol
+    // resolves. If this fails, no point proceeding — the actual batched-
+    // inversion code (next session) will rely on a similar FFI surface.
+    let sentinel = unsafe { sgn_wrapper_sentinel() };
+    if sentinel != 0xCAFE_BABE {
+        panic!(
+            "C wrapper FFI sentinel mismatch: expected 0xCAFEBABE, got 0x{:08X}",
+            sentinel
+        );
+    }
+
     let target_set: HashSet<[u8; 20]> = targets
         .iter()
         .filter_map(|b| {
