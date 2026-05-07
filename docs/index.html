@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Satoshi Guesser — Real-time stats</title>
+  <meta name="description" content="Live statistics for the Satoshi Guesser project: random Bitcoin private keys checked against Patoshi-pattern wallets on free GitHub Actions infrastructure.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div class="logo" aria-hidden="true">₿</div>
+      <h1>Satoshi Guesser</h1>
+      <p class="tagline">Random Bitcoin private keys. Real cryptography. Free compute.</p>
+    </header>
+
+    <section class="counter-section">
+      <div class="counter-label">Keys checked since launch <span class="counter-note">(estimated)</span></div>
+      <div class="counter" id="counter">—</div>
+      <div class="counter-rate">
+        <span id="rate-display">…</span> keys per second, sustained
+      </div>
+    </section>
+
+    <section class="cards">
+      <div class="card">
+        <div class="card-label">Per second</div>
+        <div class="card-value">14.85 M</div>
+        <div class="card-detail">across 80 native-Rust threads</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Per day</div>
+        <div class="card-value">1.25 T</div>
+        <div class="card-detail">when all workers active</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Per year</div>
+        <div class="card-value">455 T</div>
+        <div class="card-detail">at the current rate</div>
+      </div>
+    </section>
+
+    <section class="math">
+      <h2>The odds</h2>
+      <div class="math-grid">
+        <div class="math-cell">
+          <div class="math-label">Keyspace</div>
+          <div class="math-value">2<sup>256</sup></div>
+          <div class="math-detail">≈ 1.16 × 10<sup>77</sup> possible private keys</div>
+        </div>
+        <div class="math-cell">
+          <div class="math-label">Targets</div>
+          <div class="math-value">21,953</div>
+          <div class="math-detail">Patoshi-pattern P2PKH addresses</div>
+        </div>
+        <div class="math-cell">
+          <div class="math-label">Probability per attempt</div>
+          <div class="math-value">1 in 5.3 × 10<sup>72</sup></div>
+          <div class="math-detail">22k targets out of 2<sup>256</sup></div>
+        </div>
+        <div class="math-cell">
+          <div class="math-label">Expected time to hit</div>
+          <div class="math-value">~10<sup>58</sup> years</div>
+          <div class="math-detail">~10<sup>48</sup> × the age of the universe</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="scale">
+      <h2>For scale</h2>
+      <ul class="scale-list">
+        <li><strong>1.25 trillion keys/day</strong> — about 6× the number of stars in the Milky Way, every day.</li>
+        <li><strong>The Milky Way has ~200 billion stars.</strong> We check that many keys every 14 seconds.</li>
+        <li><strong>The universe is ~13.8 billion years old.</strong> Expected time to find a match is ~10<sup>48</sup> times that.</li>
+        <li><strong>Even at maximum theoretical optimization</strong> — full GPU farm, every CPU on Earth — finding a key is closer to confirming Bitcoin works than threatening it.</li>
+      </ul>
+    </section>
+
+    <section class="how-it-works">
+      <h2>How it works</h2>
+      <div class="prose">
+        <p>Each spin draws a cryptographically random 256-bit number and treats it as a Bitcoin private key. From that, secp256k1 elliptic-curve math derives a public key, then SHA-256 and RIPEMD-160 produce a 20-byte hash160. That hash gets compared against a local list of ~22,000 Patoshi-pattern addresses — the wallets widely attributed to Satoshi.</p>
+        <p>It runs on GitHub Actions across 20 parallel workers, each running 4 native-Rust threads. Each thread checks ~185,600 keys per second using libsecp256k1 with the incremental pubkey trick (one scalar multiplication per batch, point additions for the rest). No server, no cloud bill, no external API calls — just math.</p>
+      </div>
+    </section>
+
+    <section class="status">
+      <h2>Status</h2>
+      <div class="status-grid">
+        <div class="status-row"><span class="status-label">Active workers</span><span class="status-value">20</span></div>
+        <div class="status-row"><span class="status-label">Threads per worker</span><span class="status-value">4</span></div>
+        <div class="status-row"><span class="status-label">Per-thread rate</span><span class="status-value">~185,600 keys/sec</span></div>
+        <div class="status-row"><span class="status-label">Schedule</span><span class="status-value">Every 6 hours</span></div>
+        <div class="status-row"><span class="status-label">Implementation</span><span class="status-value">Native Rust addon (napi-rs)</span></div>
+        <div class="status-row"><span class="status-label">Last stats sync</span><span class="status-value" id="last-update">—</span></div>
+      </div>
+    </section>
+
+    <footer>
+      <a href="https://github.com/MBarc/Satoshi-Guesser" class="github-link" target="_blank" rel="noopener">View on GitHub</a>
+      <p class="disclaimer">Nobody is cracking Bitcoin this way. The keyspace is that big on purpose, and running this is closer to confirming Bitcoin works than threatening it.</p>
+    </footer>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>

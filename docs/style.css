@@ -1,0 +1,406 @@
+:root {
+  --bitcoin-orange: #F7931A;
+  --bitcoin-orange-light: #FFB347;
+  --bitcoin-orange-dark: #E07F0A;
+  --bitcoin-orange-faint: rgba(247, 147, 26, 0.06);
+  --text: #1a1a1a;
+  --text-muted: #6a6a6a;
+  --text-faint: #9a9a9a;
+  --bg: #ffffff;
+  --bg-subtle: #fafafa;
+  --bg-card: #ffffff;
+  --border: #ececec;
+  --border-strong: #d8d8d8;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 1px 3px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(247, 147, 26, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'tnum' 1, 'cv11' 1;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ==================== HERO ==================== */
+.hero {
+  text-align: center;
+  padding: 80px 0 32px;
+}
+
+.logo {
+  font-size: 96px;
+  color: var(--bitcoin-orange);
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 24px;
+  text-shadow: 0 4px 32px rgba(247, 147, 26, 0.18);
+}
+
+.hero h1 {
+  font-size: 56px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin-bottom: 12px;
+  background: linear-gradient(180deg, var(--text) 0%, #444 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.tagline {
+  font-size: 19px;
+  color: var(--text-muted);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* ==================== LIVE COUNTER ==================== */
+.counter-section {
+  text-align: center;
+  padding: 48px 24px;
+  background: linear-gradient(180deg, var(--bitcoin-orange-faint) 0%, transparent 100%);
+  border-radius: 20px;
+  margin: 32px 0 56px;
+  border: 1px solid var(--bitcoin-orange-faint);
+}
+
+.counter-label {
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+
+.counter-note {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.counter {
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-size: clamp(36px, 7vw, 72px);
+  font-weight: 700;
+  color: var(--bitcoin-orange);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  margin-bottom: 16px;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.counter-rate {
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+#rate-display {
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================== CARDS ==================== */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 56px 0 64px;
+}
+
+.card {
+  padding: 28px 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--bitcoin-orange);
+  box-shadow: var(--shadow-md);
+}
+
+.card-label {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.card-value {
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-size: 38px;
+  font-weight: 700;
+  color: var(--bitcoin-orange);
+  margin-bottom: 8px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-detail {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ==================== SECTIONS ==================== */
+section.math,
+section.scale,
+section.how-it-works,
+section.status {
+  margin: 72px 0;
+}
+
+h2 {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 28px;
+  letter-spacing: -0.01em;
+}
+
+/* ==================== MATH GRID ==================== */
+.math-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.math-cell {
+  padding: 24px 28px;
+  background: var(--bg-subtle);
+  border-radius: 12px;
+  border-left: 3px solid var(--bitcoin-orange);
+}
+
+.math-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.math-value {
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+  line-height: 1.1;
+}
+
+.math-value sup {
+  font-size: 0.55em;
+  vertical-align: super;
+}
+
+.math-detail {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.math-detail sup {
+  font-size: 0.7em;
+  vertical-align: super;
+}
+
+/* ==================== SCALE LIST ==================== */
+.scale-list {
+  list-style: none;
+  display: grid;
+  gap: 16px;
+}
+
+.scale-list li {
+  padding: 16px 20px 16px 24px;
+  background: var(--bg-subtle);
+  border-radius: 10px;
+  position: relative;
+  font-size: 15px;
+  color: var(--text);
+  border-left: 3px solid var(--bitcoin-orange);
+}
+
+.scale-list li strong {
+  color: var(--bitcoin-orange-dark);
+  font-weight: 600;
+}
+
+.scale-list li sup {
+  font-size: 0.7em;
+  vertical-align: super;
+}
+
+/* ==================== HOW IT WORKS ==================== */
+.prose {
+  max-width: 720px;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.prose p {
+  margin-bottom: 16px;
+}
+
+.prose p:last-child {
+  margin-bottom: 0;
+}
+
+/* ==================== STATUS ==================== */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0;
+  background: var(--bg-subtle);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.status-row:nth-last-child(-n+2) {
+  border-bottom: none;
+}
+
+.status-label {
+  color: var(--text-muted);
+}
+
+.status-value {
+  color: var(--text);
+  font-weight: 500;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================== FOOTER ==================== */
+footer {
+  text-align: center;
+  padding: 56px 24px 64px;
+  border-top: 1px solid var(--border);
+  margin-top: 72px;
+}
+
+.github-link {
+  display: inline-block;
+  padding: 14px 28px;
+  background: var(--bitcoin-orange);
+  color: white;
+  text-decoration: none;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 28px;
+  transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  letter-spacing: 0.01em;
+}
+
+.github-link:hover {
+  background: var(--bitcoin-orange-dark);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(247, 147, 26, 0.25);
+}
+
+.github-link:active {
+  transform: translateY(0);
+}
+
+.disclaimer {
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 580px;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+/* ==================== RESPONSIVE ==================== */
+@media (max-width: 768px) {
+  main {
+    padding: 0 16px;
+  }
+
+  .hero {
+    padding: 56px 0 24px;
+  }
+
+  .hero h1 {
+    font-size: 38px;
+  }
+
+  .logo {
+    font-size: 72px;
+  }
+
+  .tagline {
+    font-size: 17px;
+  }
+
+  .counter-section {
+    padding: 32px 16px;
+  }
+
+  .cards,
+  .math-grid,
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .card-value {
+    font-size: 32px;
+  }
+
+  .math-value {
+    font-size: 24px;
+  }
+
+  h2 {
+    font-size: 24px;
+  }
+
+  section.math,
+  section.scale,
+  section.how-it-works,
+  section.status {
+    margin: 56px 0;
+  }
+
+  .status-row:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+  }
+}
