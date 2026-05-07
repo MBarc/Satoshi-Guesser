@@ -24,14 +24,14 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cache node_modules
+      - name: Cache root node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('package.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install root dependencies
+        run: npm ci || npm install
 
       - name: Get week number (for cache key)
         id: week
@@ -47,6 +47,40 @@ jobs:
       - name: Fetch Satoshi address list
         if: steps.addr-cache.outputs.cache-hit != 'true'
         run: node scripts/fetch-addresses.js
+
+      - name: Cache native build artifacts
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            native/index.js
+            native/index.d.ts
+            native/*.node
+          key: native-${{ runner.os }}-${{ hashFiles('native/Cargo.toml', 'native/src/**/*.rs', 'native/build.rs', 'native/package.json') }}
+
+      - name: Install Rust toolchain
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.toml') }}
+
+      - name: Install native devDependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        working-directory: native
+        run: npm install
+
+      - name: Build native addon
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        working-directory: native
+        run: npm run build
 
       - name: Run guesser
         run: node src/spin.js
