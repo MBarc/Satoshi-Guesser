@@ -52,11 +52,16 @@ pub fn search(
     let secp = Secp256k1::new();
     let mut rng = rand::thread_rng();
 
-    // Scalar 1: adding this as a tweak to a pubkey adds G.
-    let one = {
-        let mut b = [0u8; 32];
-        b[31] = 1;
-        Scalar::from_be_bytes(b).expect("scalar 1 fits below curve order")
+    // Precomputed PublicKey representation of G (the curve generator). Adding
+    // this to a pubkey via PublicKey::combine performs a true point addition
+    // (~1-2us per call), unlike PublicKey::add_exp_tweak with scalar 1, which
+    // internally performs a full scalar multiplication.
+    let g_pubkey = {
+        let mut one_bytes = [0u8; 32];
+        one_bytes[31] = 1;
+        let one_sk =
+            SecretKey::from_slice(&one_bytes).expect("scalar 1 is a valid private key");
+        PublicKey::from_secret_key(&secp, &one_sk)
     };
 
     let start = Instant::now();
@@ -109,9 +114,12 @@ pub fn search(
             }
 
             if i + 1 < batch_size {
+                // P_(i+1) = P_i + G via true point addition. The combine call
+                // can only fail if the result is the point at infinity, which
+                // requires P_i = -G — probability ~1/n, statistically zero.
                 pub_k = pub_k
-                    .add_exp_tweak(&secp, &one)
-                    .expect("scalar 1 always yields a valid pubkey");
+                    .combine(&g_pubkey)
+                    .expect("point addition cannot produce identity in random walk");
             }
         }
 
