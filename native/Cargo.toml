@@ -17,6 +17,7 @@ hex = "0.4"
 
 [build-dependencies]
 napi-build = "2.1"
+cc = "1.0"
 
 [profile.release]
 lto = true

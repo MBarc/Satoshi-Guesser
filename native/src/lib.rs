@@ -9,6 +9,23 @@ use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+// FFI binding to our C wrapper. Used today only to verify the build pipeline
+// works (returns a known sentinel). Next session, this header will declare a
+// function that performs a batched walk + Montgomery-trick normalization
+// using libsecp256k1's internal Jacobian-coordinate API.
+extern "C" {
+    fn sgn_wrapper_sentinel() -> u32;
+}
+
+/// Build-pipeline check: returns true iff the C wrapper is linked and
+/// returning its expected sentinel value (0xCAFEBABE). Exported so the
+/// JS side can confirm before relying on any C-wrapper functionality.
+#[napi]
+pub fn c_wrapper_alive() -> bool {
+    let sentinel = unsafe { sgn_wrapper_sentinel() };
+    sentinel == 0xCAFE_BABE
+}
+
 #[napi(object)]
 pub struct MatchResult {
     pub priv_key_hex: String,
