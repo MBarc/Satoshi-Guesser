@@ -7,8 +7,66 @@ on:
     - cron: '0 */6 * * *'
 
 jobs:
+  build-native:
+    name: Build native addon
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache native build output
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            native/index.js
+            native/index.d.ts
+            native/*.node
+          key: native-${{ runner.os }}-${{ hashFiles('native/Cargo.toml', 'native/src/**/*.rs', 'native/build.rs', 'native/package.json') }}
+
+      - name: Install Rust toolchain
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/Cargo.toml') }}
+
+      - name: Install napi-rs CLI
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        working-directory: native
+        run: npm install
+
+      - name: Build native addon
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        working-directory: native
+        run: npm run build
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-${{ github.run_id }}
+          path: |
+            native/index.js
+            native/index.d.ts
+            native/*.node
+          retention-days: 1
+          if-no-files-found: error
+
   guess:
     name: Worker ${{ matrix.worker }}
+    needs: build-native
     runs-on: ubuntu-latest
     timeout-minutes: 355
 
@@ -24,14 +82,14 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cache node_modules
+      - name: Cache root node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('package.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json', 'package.json') }}
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install root dependencies
+        run: npm ci || npm install
 
       - name: Get week number (for cache key)
         id: week
@@ -47,6 +105,19 @@ jobs:
       - name: Fetch Satoshi address list
         if: steps.addr-cache.outputs.cache-hit != 'true'
         run: node scripts/fetch-addresses.js
+
+      - name: Download native addon artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-build-${{ github.run_id }}
+          path: native
+
+      - name: Verify native addon presence
+        run: |
+          ls -la native/
+          test -f native/index.js
+          test -f native/index.d.ts
+          ls native/*.node
 
       - name: Run guesser
         run: node src/spin.js
