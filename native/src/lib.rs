@@ -3,8 +3,8 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use rand::RngCore;
-use ripemd::{Digest as RipemdDigest, Ripemd160};
-use sha2::{Digest as ShaDigest, Sha256};
+use ripemd::{Digest as _, Ripemd160};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -243,8 +243,8 @@ mod tests {
             <ProjectivePoint as BatchNormalize<[ProjectivePoint]>>::batch_normalize(
                 projective.as_slice(),
             );
-        let batch_h160s: Vec<[u8; 20]> = affines
-            .as_ref()
+        let affines_slice: &[AffinePoint] = affines.as_ref();
+        let batch_h160s: Vec<[u8; 20]> = affines_slice
             .iter()
             .map(|a| {
                 let enc = a.to_encoded_point(false);
