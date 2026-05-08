@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use k256::elliptic_curve::point::BatchNormalize;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::elliptic_curve::PrimeField;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 
 // FFI to the C wrapper. Kept as a fallback escape hatch: if k256-based batched
