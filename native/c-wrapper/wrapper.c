@@ -1,23 +1,23 @@
 /*
  * c-wrapper for Satoshi Guesser native addon.
  *
- * Currently exposes:
- *   - sgn_wrapper_sentinel(): build-pipeline check (returns 0xCAFEBABE)
- *   - ripemd160_8way():       8-way AVX2 RIPEMD-160. Hashes 8 independent
- *                             32-byte inputs in parallel, producing 8 × 20-byte
- *                             outputs. The hot path post-batched-inversion
- *                             spends roughly 40% of its time in RIPEMD-160;
- *                             this brings that closer to ~10-15%.
+ * Exposes:
+ *   - sgn_wrapper_sentinel():        build-pipeline check (returns 0xCAFEBABE)
+ *   - sgn_compute_affine_batch():    libsecp256k1-internal scalar mult +
+ *                                    Jacobian walk + Montgomery batch invert.
+ *                                    Writes N × 64 bytes (32 byte BE x ||
+ *                                    32 byte BE y) to caller's buffer.
+ *   - ripemd160_8way():              8-way AVX2 RIPEMD-160. 8 independent
+ *                                    32-byte inputs -> 8 × 20-byte outputs.
+ *
+ * Hybrid strategy: hashing stays in Rust (sha2's SHA-NI path + this file's
+ * 8-way RIPEMD-160 via FFI). Only the EC math goes through libsecp's hand-
+ * tuned field arithmetic, which beats k256's pure Rust by ~30% on Jacobian
+ * additions. A previous attempt at full-C hashing regressed because
+ * libsecp's portable SHA-256 has no SHA-NI; this design avoids that trap.
  *
  * RIPEMD-160 spec:
  *   https://homes.esat.kuleuven.be/~bosselae/ripemd160.html
- *
- * SIMD strategy: 8 hashes proceed in lockstep. Each AVX2 __m256i register
- * holds the same 32-bit word from all 8 hashes (lane-major layout). The 16
- * message words X[0..15] live in 16 registers post-transpose; the 5 state
- * words for each of the two parallel "lines" live in 5 registers each.
- * Total live register pressure ~26 — fits in AVX2's 16 ymm registers with
- * predictable spilling that the compiler handles well.
  */
 
 #include <stdint.h>
@@ -29,6 +29,105 @@
 
 uint32_t sgn_wrapper_sentinel(void) {
     return 0xCAFEBABEu;
+}
+
+/* ===============================================================
+ * libsecp256k1 unity build + EC batch function
+ *
+ * Including secp256k1.c (and the precomputed-table .c files) here gives us
+ * inline access to the internal *_impl.h functions: secp256k1_gej_add_ge_var,
+ * secp256k1_fe_inv, secp256k1_ecmult_gen, secp256k1_ge_const_g, etc. The
+ * build defines (ECMULT_WINDOW_SIZE, ECMULT_GEN_PREC_BITS, USE_FIELD_5X52,
+ * USE_SCALAR_4X64) come from build.rs.
+ * =============================================================== */
+
+#include "libsecp256k1/src/secp256k1.c"
+#include "libsecp256k1/src/precomputed_ecmult.c"
+#include "libsecp256k1/src/precomputed_ecmult_gen.c"
+
+#define SGN_MAX_BATCH 16384
+
+/* Per-thread scratch arrays. Node worker_threads share the addon's address
+ * space, so a plain `static` here would race. _Thread_local gives each
+ * worker its own private buffers. ~1.7 MB per thread; 4 threads = ~6.8 MB. */
+#if defined(_MSC_VER)
+#define SGN_THREAD_LOCAL __declspec(thread)
+#else
+#define SGN_THREAD_LOCAL _Thread_local
+#endif
+
+static SGN_THREAD_LOCAL secp256k1_gej g_chain[SGN_MAX_BATCH];
+static SGN_THREAD_LOCAL secp256k1_fe  g_zinv[SGN_MAX_BATCH];
+static SGN_THREAD_LOCAL secp256k1_fe  g_zacc[SGN_MAX_BATCH];
+
+/* The ecmult_gen context is per-thread; built lazily on first call.
+ * `built` is a tristate-as-int, but C11 _Thread_local zero-initializes,
+ * so the first call sees built==0 and runs context_build. */
+typedef struct {
+    secp256k1_ecmult_gen_context ctx;
+    int built;
+} sgn_gen_state_t;
+
+static SGN_THREAD_LOCAL sgn_gen_state_t g_gen_state;
+
+/* Compute (k0+i)*G's affine x/y for i=0..n-1 and write them into out_xy
+ * as N × 64 bytes: each block is 32 bytes BE x || 32 bytes BE y. Returns
+ * 1 on success, 0 if k0 is out-of-range or zero (output left zeroed in
+ * that case so callers see no false positives). */
+int sgn_compute_affine_batch(
+    const uint8_t* k0_bytes,
+    uint32_t n,
+    uint8_t* out_xy
+) {
+    if (n == 0 || n > SGN_MAX_BATCH) return 0;
+
+    if (!g_gen_state.built) {
+        secp256k1_ecmult_gen_context_build(&g_gen_state.ctx);
+        g_gen_state.built = 1;
+    }
+
+    secp256k1_scalar k0;
+    int overflow = 0;
+    secp256k1_scalar_set_b32(&k0, k0_bytes, &overflow);
+    if (overflow || secp256k1_scalar_is_zero(&k0)) {
+        memset(out_xy, 0, (size_t)n * 64);
+        return 0;
+    }
+
+    /* P0 = k0 * G via libsecp's precomputed-table ecmult. */
+    secp256k1_ecmult_gen(&g_gen_state.ctx, &g_chain[0], &k0);
+
+    /* P_(i+1) = P_i + G via mixed Jacobian+affine, no inversion. */
+    for (uint32_t i = 1; i < n; i++) {
+        secp256k1_gej_add_ge_var(&g_chain[i], &g_chain[i - 1], &secp256k1_ge_const_g, NULL);
+    }
+
+    /* Montgomery batch invert: 1 fe_inv + 3*(N-1) fe_mul instead of N fe_inv. */
+    g_zacc[0] = g_chain[0].z;
+    for (uint32_t i = 1; i < n; i++) {
+        secp256k1_fe_mul(&g_zacc[i], &g_zacc[i - 1], &g_chain[i].z);
+    }
+    secp256k1_fe acc_inv;
+    secp256k1_fe_inv(&acc_inv, &g_zacc[n - 1]);
+    for (uint32_t i = n - 1; i > 0; i--) {
+        secp256k1_fe_mul(&g_zinv[i], &acc_inv, &g_zacc[i - 1]);
+        secp256k1_fe_mul(&acc_inv, &acc_inv, &g_chain[i].z);
+    }
+    g_zinv[0] = acc_inv;
+
+    /* Convert each to affine and write out 32+32 BE bytes. */
+    for (uint32_t i = 0; i < n; i++) {
+        secp256k1_fe z2, z3, x, y;
+        secp256k1_fe_sqr(&z2, &g_zinv[i]);
+        secp256k1_fe_mul(&z3, &z2, &g_zinv[i]);
+        secp256k1_fe_mul(&x, &g_chain[i].x, &z2);
+        secp256k1_fe_mul(&y, &g_chain[i].y, &z3);
+        secp256k1_fe_normalize_var(&x);
+        secp256k1_fe_normalize_var(&y);
+        secp256k1_fe_get_b32(out_xy + (size_t)i * 64,      &x);
+        secp256k1_fe_get_b32(out_xy + (size_t)i * 64 + 32, &y);
+    }
+    return 1;
 }
 
 /* ===============================================================
