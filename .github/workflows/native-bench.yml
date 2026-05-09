@@ -1,0 +1,75 @@
+name: Native bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_ms:
+        description: 'Bench duration per batch size (ms)'
+        default: '30000'
+        required: false
+      batch_sizes:
+        description: 'Comma-separated batch sizes to test'
+        default: '256,1024,4096'
+        required: false
+  push:
+    branches:
+      - 'feat/**'
+    paths:
+      - 'native/**'
+      - 'scripts/bench-native.js'
+      - '.github/workflows/native-bench.yml'
+
+jobs:
+  validate-and-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-bench-${{ runner.os }}-${{ hashFiles('native/Cargo.toml') }}
+
+      - name: Show CPU info
+        run: |
+          echo "CPU model:"
+          grep -m1 'model name' /proc/cpuinfo
+          echo ""
+          echo "CPU flags (relevant):"
+          grep -m1 'flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(sse|avx|sha|aes)' | sort -u | paste -sd, -
+
+      - name: Run cargo tests (correctness)
+        working-directory: native
+        run: cargo test --release -- --nocapture
+
+      - name: Install napi-rs CLI
+        working-directory: native
+        run: npm install
+
+      - name: Build native addon (release)
+        working-directory: native
+        run: npm run build
+
+      - name: Install root dependencies
+        run: npm ci || npm install
+
+      - name: Fetch addresses
+        run: node scripts/fetch-addresses.js
+
+      - name: Run benchmark
+        env:
+          BENCH_MS: ${{ inputs.duration_ms || '30000' }}
+          BENCH_BATCH_SIZES: ${{ inputs.batch_sizes || '256,1024,4096' }}
+        run: node scripts/bench-native.js

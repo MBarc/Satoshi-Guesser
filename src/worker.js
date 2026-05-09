@@ -35,7 +35,7 @@ function postHit(privKey) {
 
 if (nativeSearch) {
   const PROGRESS_INTERVAL_MS = 60_000;
-  const BATCH_SIZE = 4096;
+  const BATCH_SIZE = 8192;
 
   while (Date.now() - start < durationMs) {
     const remaining = durationMs - (Date.now() - start);
