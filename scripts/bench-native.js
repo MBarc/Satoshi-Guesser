@@ -1,43 +1,82 @@
-// Direct-call throughput benchmark for the native addon. Runs `search()`
-// in-process (no worker_threads) for a fixed wall-clock duration at each
-// requested batch size, prints keys/sec for comparison.
+// Multi-threaded throughput bench. Spawns BENCH_THREADS worker_threads (one
+// per CPU by default, mirroring src/spin.js production behavior) and runs each
+// for `BENCH_MS` ms at every batch size in `BENCH_BATCH_SIZES`. Reports per-
+// thread keys/sec plus the aggregate (sum / wall time).
 //
 // Env knobs:
-//   BENCH_MS              total duration per batch size (default 30000)
-//   BENCH_BATCH_SIZES     comma-separated list (default "256,1024,4096")
+//   BENCH_MS              wall-clock duration per batch size (default 120000)
+//   BENCH_BATCH_SIZES     comma-separated list (default "4096")
+//   BENCH_THREADS         worker thread count (default cpus().length)
 
-import { search } from '../native/index.js';
-import { targetHash160s } from '../src/checker.js';
+import { Worker } from 'worker_threads';
+import { cpus } from 'os';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-const DURATION_MS = parseInt(process.env.BENCH_MS || '30000', 10);
-const BATCH_SIZES = (process.env.BENCH_BATCH_SIZES || '256,1024,4096')
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const DURATION_MS = parseInt(process.env.BENCH_MS || '120000', 10);
+const BATCH_SIZES = (process.env.BENCH_BATCH_SIZES || '4096')
   .split(',')
   .map(s => parseInt(s.trim(), 10))
   .filter(n => Number.isFinite(n) && n > 0);
+const THREAD_COUNT = parseInt(
+  process.env.BENCH_THREADS || String(cpus().length),
+  10
+);
 
-console.log(`Loaded ${targetHash160s.length.toLocaleString()} hash160 targets`);
+console.log(`Threads: ${THREAD_COUNT}`);
 console.log(`Duration per batch size: ${DURATION_MS} ms`);
 console.log(`Batch sizes: ${BATCH_SIZES.join(', ')}`);
 console.log('');
 
-const results = [];
+function runBatch(batchSize) {
+  return new Promise((resolveAll, reject) => {
+    const startWall = Date.now();
+    const results = new Array(THREAD_COUNT);
+    let done = 0;
+    for (let i = 0; i < THREAD_COUNT; i++) {
+      const threadIndex = i + 1;
+      const worker = new Worker(join(__dirname, 'bench-thread.js'), {
+        workerData: { durationMs: DURATION_MS, batchSize, threadIndex },
+      });
+      worker.on('message', (msg) => {
+        results[i] = msg;
+        if (++done === THREAD_COUNT) {
+          const wallMs = Date.now() - startWall;
+          resolveAll({ batchSize, results, wallMs });
+        }
+      });
+      worker.on('error', reject);
+    }
+  });
+}
+
+const summary = [];
 for (const batchSize of BATCH_SIZES) {
-  process.stdout.write(`batch_size=${batchSize}\trunning... `);
-  const result = search(targetHash160s, DURATION_MS, batchSize);
-  const rate = Math.round((result.keysChecked * 1000) / Math.max(1, result.elapsedMs));
-  results.push({ batchSize, ...result, rate });
+  console.log(`batch_size=${batchSize}`);
+  const { results, wallMs } = await runBatch(batchSize);
+
+  let totalKeys = 0;
+  for (const r of results) {
+    const rate = Math.round((r.keysChecked * 1000) / Math.max(1, r.elapsedMs));
+    console.log(
+      `  thread ${r.threadIndex} | ${r.keysChecked.toLocaleString()} keys | ${rate.toLocaleString()} keys/sec`
+    );
+    totalKeys += r.keysChecked;
+    if (r.found) {
+      console.log(`  thread ${r.threadIndex} HIT priv=${r.found.privKeyHex}`);
+    }
+  }
+  const aggregateRate = Math.round((totalKeys * 1000) / Math.max(1, wallMs));
   console.log(
-    `keys=${result.keysChecked.toLocaleString()}\telapsed=${result.elapsedMs}ms\trate=${rate.toLocaleString()} keys/sec` +
-      (result.found ? `\tHIT priv=${result.found.privKeyHex}` : '')
+    `  AGGREGATE: ${totalKeys.toLocaleString()} keys in ${wallMs}ms | ${aggregateRate.toLocaleString()} keys/sec`
   );
+  console.log('');
+  summary.push({ batchSize, aggregateRate, totalKeys, wallMs });
 }
 
-console.log('');
-console.log('Summary (keys/sec):');
-for (const r of results) {
-  console.log(`  ${String(r.batchSize).padStart(6)} -> ${r.rate.toLocaleString()}`);
-}
-
-if (results.some(r => r.found)) {
-  console.log('\nA hit was found during the bench (extraordinary luck).');
+console.log('Summary (aggregate keys/sec across all threads):');
+for (const r of summary) {
+  console.log(`  batch=${String(r.batchSize).padStart(6)} -> ${r.aggregateRate.toLocaleString()}`);
 }
