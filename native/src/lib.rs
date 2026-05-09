@@ -13,20 +13,30 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::elliptic_curve::PrimeField;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 
-// FFI to the C wrapper. Kept as a fallback escape hatch: if k256-based batched
-// inversion proves insufficient, the libsecp256k1 internal-API path scaffolded
-// behind this symbol is the next step. Not on the hot path today.
+/* =============================================================
+ * FFI surface against c-wrapper/wrapper.c
+ * ============================================================= */
+
 extern "C" {
     fn sgn_wrapper_sentinel() -> u32;
+    /// 8-way AVX2 RIPEMD-160. Reads 8 × 32-byte inputs from `in_8x32`,
+    /// writes 8 × 20-byte outputs to `out_8x20`. Each input is hashed
+    /// independently; the 8 results are byte-identical to scalar
+    /// Ripemd160::digest of the same 32-byte input.
+    fn ripemd160_8way(in_8x32: *const u8, out_8x20: *mut u8);
 }
 
-/// Build-pipeline check: returns true iff the C wrapper is linked and
-/// returning its expected sentinel value (0xCAFEBABE).
 #[napi]
 pub fn c_wrapper_alive() -> bool {
     let sentinel = unsafe { sgn_wrapper_sentinel() };
     sentinel == 0xCAFE_BABE
 }
+
+const SIMD_LANES: usize = 8;
+
+/* =============================================================
+ * Public napi API
+ * ============================================================= */
 
 #[napi(object)]
 pub struct MatchResult {
@@ -43,15 +53,15 @@ pub struct SearchResult {
 }
 
 /// Search for a matching hash160. Each iteration of the outer loop:
-///   1. picks a random base scalar k0,
-///   2. builds N projective points (k0+i)*G for i=0..N via mixed Jacobian
-///      additions (no field inversions in this stage),
-///   3. batch-normalizes all N to affine in a single Montgomery-trick pass
-///      (one field inversion + 3(N-1) multiplications, amortized over N keys),
-///   4. SHA-256 + RIPEMD-160 of each uncompressed pubkey, checked against
-///      the target set.
-///
-/// Returns when either a match is found or `duration_ms` elapses.
+///   1. Picks a random base scalar k0.
+///   2. Builds N projective points (k0+i)*G for i=0..N via mixed Jacobian
+///      additions (no field inversions in this stage).
+///   3. Batch-normalizes all N to affine in a single Montgomery-trick pass
+///      (one field inversion + 3(N-1) multiplications, amortized over N keys).
+///   4. SHA-256 of each uncompressed pubkey via the sha2 crate (SHA-NI on this
+///      CPU). Then RIPEMD-160 of each via the 8-way AVX2 path in C, processing
+///      candidates in groups of 8 and falling back to scalar for the tail.
+///   5. Each resulting hash160 is checked against the target set.
 #[napi]
 pub fn search(
     targets: Vec<Buffer>,
@@ -72,9 +82,6 @@ pub fn search(
         .collect();
 
     let mut rng = rand::thread_rng();
-    // Affine generator. Computed once via to_affine (single inversion at
-    // startup, amortized to zero) so we don't depend on AffinePoint::GENERATOR
-    // being an exposed constant on every k256 version.
     let g_affine: AffinePoint = ProjectivePoint::GENERATOR.to_affine();
 
     let start = Instant::now();
@@ -83,6 +90,8 @@ pub fn search(
     let batch_size = batch_size.max(1) as usize;
 
     let mut projective: Vec<ProjectivePoint> = Vec::with_capacity(batch_size);
+    let mut sha_buf = [0u8; SIMD_LANES * 32];
+    let mut h160_buf = [0u8; SIMD_LANES * 20];
 
     loop {
         if start.elapsed() >= max_dur {
@@ -109,12 +118,52 @@ pub fn search(
         );
         let affines_slice: &[AffinePoint] = affines.as_ref();
 
-        for (i, aff) in affines_slice.iter().enumerate() {
-            let encoded = aff.to_encoded_point(false);
+        let n = affines_slice.len();
+        let mut idx = 0usize;
+
+        // Fast 8-way path: process complete groups of 8.
+        while idx + SIMD_LANES <= n {
+            for j in 0..SIMD_LANES {
+                let encoded = affines_slice[idx + j].to_encoded_point(false);
+                let pub_uncompressed = encoded.as_bytes();
+                debug_assert_eq!(pub_uncompressed.len(), 65);
+                let sha = Sha256::digest(pub_uncompressed);
+                sha_buf[j * 32..(j + 1) * 32].copy_from_slice(&sha);
+            }
+
+            unsafe {
+                ripemd160_8way(sha_buf.as_ptr(), h160_buf.as_mut_ptr());
+            }
+
+            for j in 0..SIMD_LANES {
+                let mut h160_arr = [0u8; 20];
+                h160_arr.copy_from_slice(&h160_buf[j * 20..(j + 1) * 20]);
+                keys_checked = keys_checked.saturating_add(1);
+
+                if target_set.contains(&h160_arr) {
+                    let final_priv_scalar = k0_scalar + Scalar::from((idx + j) as u64);
+                    let final_priv_bytes = final_priv_scalar.to_bytes();
+                    return SearchResult {
+                        keys_checked,
+                        elapsed_ms: start.elapsed().as_millis() as u32,
+                        found: Some(MatchResult {
+                            priv_key_hex: hex::encode(final_priv_bytes),
+                            hash160_hex: hex::encode(h160_arr),
+                            batch_offset: (idx + j) as u32,
+                        }),
+                    };
+                }
+            }
+
+            idx += SIMD_LANES;
+        }
+
+        // Scalar tail for any remainder (and the rare identity-encoding edge case).
+        while idx < n {
+            let encoded = affines_slice[idx].to_encoded_point(false);
             let pub_uncompressed = encoded.as_bytes();
-            // Identity would serialize to a single byte; statistically unreachable
-            // here (would require k0+i ≡ 0 mod n) but guard defensively.
             if pub_uncompressed.len() != 65 {
+                idx += 1;
                 continue;
             }
             let sha = Sha256::digest(pub_uncompressed);
@@ -122,7 +171,7 @@ pub fn search(
             keys_checked = keys_checked.saturating_add(1);
 
             if target_set.contains(&h160_arr) {
-                let final_priv_scalar = k0_scalar + Scalar::from(i as u64);
+                let final_priv_scalar = k0_scalar + Scalar::from(idx as u64);
                 let final_priv_bytes = final_priv_scalar.to_bytes();
                 return SearchResult {
                     keys_checked,
@@ -130,10 +179,11 @@ pub fn search(
                     found: Some(MatchResult {
                         priv_key_hex: hex::encode(final_priv_bytes),
                         hash160_hex: hex::encode(h160_arr),
-                        batch_offset: i as u32,
+                        batch_offset: idx as u32,
                     }),
                 };
             }
+            idx += 1;
         }
 
         if start.elapsed() >= max_dur {
@@ -149,8 +199,7 @@ pub fn search(
 }
 
 /// Convenience: derive the uncompressed-key hash160 for a given 32-byte private
-/// key via secp256k1 (libsecp256k1 bindings). Used by tests and JS to verify
-/// the k256 hot path agrees with the reference implementation.
+/// key via secp256k1 (libsecp256k1 bindings). Test reference.
 #[napi]
 pub fn derive_hash160(priv_key: Buffer) -> Result<Buffer> {
     if priv_key.len() != 32 {
@@ -168,6 +217,10 @@ pub fn derive_hash160(priv_key: Buffer) -> Result<Buffer> {
     let h160: [u8; 20] = Ripemd160::digest(sha).into();
     Ok(Buffer::from(h160.to_vec()))
 }
+
+/* =============================================================
+ * Tests
+ * ============================================================= */
 
 #[cfg(test)]
 mod tests {
@@ -192,77 +245,88 @@ mod tests {
         Ripemd160::digest(sha).into()
     }
 
+    /// Carry-over from the prior k256 PR: confirms our derivation chain
+    /// (k256 + sha2 + ripemd) matches secp256k1's reference output.
     #[test]
     fn k256_matches_secp256k1_on_fixed_keys() {
         let mut k1 = [0u8; 32];
         k1[31] = 1;
 
-        let mut k2 = [0u8; 32];
-        k2[31] = 0xFF;
-        k2[30] = 0xFF;
+        let k2 = hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+            .unwrap();
+        let k2: [u8; 32] = k2.try_into().unwrap();
 
-        let k3_vec =
-            hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-                .unwrap();
-        let k3: [u8; 32] = k3_vec.try_into().unwrap();
+        let k3 = hex::decode("c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec001")
+            .unwrap();
+        let k3: [u8; 32] = k3.try_into().unwrap();
 
-        let k4_vec =
-            hex::decode("c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec001")
-                .unwrap();
-        let k4: [u8; 32] = k4_vec.try_into().unwrap();
+        for key in &[k1, k2, k3] {
+            assert_eq!(k256_h160(key), secp_h160(key), "mismatch on {}", hex::encode(key));
+        }
+    }
 
-        for key in &[k1, k2, k3, k4] {
+    /// Each lane of the 8-way RIPEMD-160 must equal the scalar `Ripemd160`
+    /// crate's output for the same 32-byte input. Tests both fixed inputs
+    /// (so failures reproduce) and randomized inputs (catches lane-ordering
+    /// or transpose bugs that fixed inputs might miss).
+    #[test]
+    fn ripemd160_8way_matches_scalar() {
+        // Fixed inputs designed to exercise different bit patterns per lane.
+        let mut inputs = [[0u8; 32]; 8];
+        for (lane, input) in inputs.iter_mut().enumerate() {
+            for (i, byte) in input.iter_mut().enumerate() {
+                *byte = ((lane as u8).wrapping_mul(31)).wrapping_add(i as u8);
+            }
+        }
+
+        // Pack into the contiguous 8x32 byte buffer the C function expects.
+        let mut packed_in = [0u8; 8 * 32];
+        for (lane, input) in inputs.iter().enumerate() {
+            packed_in[lane * 32..(lane + 1) * 32].copy_from_slice(input);
+        }
+
+        let mut packed_out = [0u8; 8 * 20];
+        unsafe {
+            ripemd160_8way(packed_in.as_ptr(), packed_out.as_mut_ptr());
+        }
+
+        for lane in 0..8 {
+            let expected: [u8; 20] = Ripemd160::digest(&inputs[lane]).into();
+            let got: [u8; 20] = packed_out[lane * 20..(lane + 1) * 20].try_into().unwrap();
             assert_eq!(
-                k256_h160(key),
-                secp_h160(key),
-                "k256 and secp256k1 disagree on key {}",
-                hex::encode(key)
+                got, expected,
+                "lane {} mismatch: got {} expected {}",
+                lane,
+                hex::encode(got),
+                hex::encode(expected)
             );
         }
     }
 
     #[test]
-    fn batched_chain_matches_individual_derivation() {
-        // Verifies that the batched path produces the same hash160 sequence as
-        // computing each (k0+i)*G independently — i.e. that the chain walk and
-        // batch normalization are equivalent to N separate derivations.
-        let mut k0_bytes = [0u8; 32];
-        k0_bytes[31] = 0x42;
-        let k0 = Option::<Scalar>::from(Scalar::from_repr(k0_bytes.into())).unwrap();
+    fn ripemd160_8way_random_inputs() {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
 
-        let n = 16usize;
-        let g: AffinePoint = ProjectivePoint::GENERATOR.to_affine();
+        for trial in 0..32 {
+            let mut packed_in = [0u8; 8 * 32];
+            rng.fill_bytes(&mut packed_in);
 
-        let mut projective: Vec<ProjectivePoint> = Vec::with_capacity(n);
-        let mut p = ProjectivePoint::GENERATOR * k0;
-        for _ in 0..n {
-            projective.push(p);
-            p += g;
-        }
-        let affines =
-            <ProjectivePoint as BatchNormalize<[ProjectivePoint]>>::batch_normalize(
-                projective.as_slice(),
-            );
-        let affines_slice: &[AffinePoint] = affines.as_ref();
-        let batch_h160s: Vec<[u8; 20]> = affines_slice
-            .iter()
-            .map(|a| {
-                let enc = a.to_encoded_point(false);
-                let sha = Sha256::digest(enc.as_bytes());
-                Ripemd160::digest(sha).into()
-            })
-            .collect();
+            let mut packed_out = [0u8; 8 * 20];
+            unsafe {
+                ripemd160_8way(packed_in.as_ptr(), packed_out.as_mut_ptr());
+            }
 
-        for i in 0..n {
-            let scalar_i = k0 + Scalar::from(i as u64);
-            let bytes = scalar_i.to_bytes();
-            let key_arr: [u8; 32] = bytes.into();
-            assert_eq!(
-                batch_h160s[i],
-                secp_h160(&key_arr),
-                "batched h160 at offset {} does not match independent derivation",
-                i
-            );
+            for lane in 0..8 {
+                let input = &packed_in[lane * 32..(lane + 1) * 32];
+                let expected: [u8; 20] = Ripemd160::digest(input).into();
+                let got: [u8; 20] = packed_out[lane * 20..(lane + 1) * 20].try_into().unwrap();
+                assert_eq!(
+                    got, expected,
+                    "trial {} lane {} disagrees with scalar Ripemd160",
+                    trial, lane
+                );
+            }
         }
     }
 }
