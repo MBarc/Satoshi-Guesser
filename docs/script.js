@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // The counter shows an estimated cumulative key count since the project began
-// running on GitHub Actions. The estimate uses five throughput phases that
+// running on GitHub Actions. The estimate uses six throughput phases that
 // match the actual code evolution on main:
 //
 //   Phase 1 (pre-f507834):    ~6 billion keys/day      — pure JS, slow EC
@@ -11,6 +11,7 @@
 //   Phase 3 (post-Plan 8):    ~1.25 trillion keys/day  — native Rust addon, per-step combine
 //   Phase 4 (post-PR #2):     ~4.69 trillion keys/day  — k256 batched inversion, BATCH_SIZE=8192
 //   Phase 5 (post-PR #3):     ~5.53 trillion keys/day  — 8-way AVX2 RIPEMD-160
+//   Phase 6 (post-PR #4):     ~6.87 trillion keys/day  — libsecp256k1 EC math (hybrid)
 //
 // When the weekly stats workflow has populated stats.json with a real
 // cumulative total, that value overrides the estimate and the counter
@@ -25,6 +26,7 @@ const PHASE_BOUNDARIES = {
   PLAN_8:    new Date('2026-05-07T21:40:00Z').getTime(), // PR #1 merge time
   PR_2:      new Date('2026-05-09T00:57:00Z').getTime(), // PR #2 merge time (k256 batched inversion)
   PR_3:      new Date('2026-05-09T03:23:37Z').getTime(), // PR #3 merge time (8-way AVX2 RIPEMD-160)
+  PR_4:      new Date('2026-05-09T20:16:18Z').getTime(), // PR #4 merge time (libsecp hybrid)
 };
 
 const RATES_PER_DAY = {
@@ -33,10 +35,11 @@ const RATES_PER_DAY = {
   phase3: 1.25e12,
   phase4: 4.69e12,
   phase5: 5.53e12,
+  phase6: 6.87e12,
 };
 
 const SECONDS_PER_DAY = 86_400;
-const CURRENT_RATE_PER_SECOND = RATES_PER_DAY.phase5 / SECONDS_PER_DAY;
+const CURRENT_RATE_PER_SECOND = RATES_PER_DAY.phase6 / SECONDS_PER_DAY;
 
 const TARGETS = 21953;
 const KEYSPACE_LOG10 = 77.064; // log10(2^256) ≈ 77.064
@@ -50,14 +53,16 @@ function estimatedKeysSinceLaunch(now = Date.now()) {
   const p2End = Math.min(now, PHASE_BOUNDARIES.PLAN_8);
   const p3End = Math.min(now, PHASE_BOUNDARIES.PR_2);
   const p4End = Math.min(now, PHASE_BOUNDARIES.PR_3);
+  const p5End = Math.min(now, PHASE_BOUNDARIES.PR_4);
 
   const p1 = seconds(PHASE_BOUNDARIES.LAUNCH, p1End)    * (RATES_PER_DAY.phase1 / SECONDS_PER_DAY);
   const p2 = seconds(PHASE_BOUNDARIES.F507834, p2End)   * (RATES_PER_DAY.phase2 / SECONDS_PER_DAY);
   const p3 = seconds(PHASE_BOUNDARIES.PLAN_8, p3End)    * (RATES_PER_DAY.phase3 / SECONDS_PER_DAY);
   const p4 = seconds(PHASE_BOUNDARIES.PR_2, p4End)      * (RATES_PER_DAY.phase4 / SECONDS_PER_DAY);
-  const p5 = seconds(PHASE_BOUNDARIES.PR_3, now)        * (RATES_PER_DAY.phase5 / SECONDS_PER_DAY);
+  const p5 = seconds(PHASE_BOUNDARIES.PR_3, p5End)      * (RATES_PER_DAY.phase5 / SECONDS_PER_DAY);
+  const p6 = seconds(PHASE_BOUNDARIES.PR_4, now)        * (RATES_PER_DAY.phase6 / SECONDS_PER_DAY);
 
-  return Math.floor(p1 + p2 + p3 + p4 + p5);
+  return Math.floor(p1 + p2 + p3 + p4 + p5 + p6);
 }
 
 function formatNumber(n) {
