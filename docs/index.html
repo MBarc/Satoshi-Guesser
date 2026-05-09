@@ -29,17 +29,17 @@
     <section class="cards">
       <div class="card">
         <div class="card-label">Per second</div>
-        <div class="card-value">14.85 M</div>
+        <div class="card-value">55.7 M</div>
         <div class="card-detail">across 80 native-Rust threads</div>
       </div>
       <div class="card">
         <div class="card-label">Per day</div>
-        <div class="card-value">1.25 T</div>
+        <div class="card-value">4.69 T</div>
         <div class="card-detail">when all workers active</div>
       </div>
       <div class="card">
         <div class="card-label">Per year</div>
-        <div class="card-value">455 T</div>
+        <div class="card-value">1.71 P</div>
         <div class="card-detail">at the current rate</div>
       </div>
     </section>
@@ -64,8 +64,8 @@
         </div>
         <div class="math-cell">
           <div class="math-label">Expected time to hit</div>
-          <div class="math-value">~10<sup>58</sup> years</div>
-          <div class="math-detail">~10<sup>48</sup> × the age of the universe</div>
+          <div class="math-value">~10<sup>57</sup> years</div>
+          <div class="math-detail">~10<sup>47</sup> × the age of the universe</div>
         </div>
       </div>
     </section>
@@ -73,9 +73,9 @@
     <section class="scale">
       <h2>For scale</h2>
       <ul class="scale-list">
-        <li><strong>1.25 trillion keys/day</strong> — about 6× the number of stars in the Milky Way, every day.</li>
-        <li><strong>The Milky Way has ~200 billion stars.</strong> We check that many keys every 14 seconds.</li>
-        <li><strong>The universe is ~13.8 billion years old.</strong> Expected time to find a match is ~10<sup>48</sup> times that.</li>
+        <li><strong>4.69 trillion keys/day</strong> — about 23× the number of stars in the Milky Way, every day.</li>
+        <li><strong>The Milky Way has ~200 billion stars.</strong> We check that many keys every 3.6 seconds.</li>
+        <li><strong>The universe is ~13.8 billion years old.</strong> Expected time to find a match is ~10<sup>47</sup> times that.</li>
         <li><strong>Even at maximum theoretical optimization</strong> — full GPU farm, every CPU on Earth — finding a key is closer to confirming Bitcoin works than threatening it.</li>
       </ul>
     </section>
@@ -84,7 +84,7 @@
       <h2>How it works</h2>
       <div class="prose">
         <p>Each spin draws a cryptographically random 256-bit number and treats it as a Bitcoin private key. From that, secp256k1 elliptic-curve math derives a public key, then SHA-256 and RIPEMD-160 produce a 20-byte hash160. That hash gets compared against a local list of ~22,000 Patoshi-pattern addresses — the wallets widely attributed to Satoshi.</p>
-        <p>It runs on GitHub Actions across 20 parallel workers, each running 4 native-Rust threads. Each thread checks ~185,600 keys per second using libsecp256k1 with the incremental pubkey trick (one scalar multiplication per batch, point additions for the rest). No server, no cloud bill, no external API calls — just math.</p>
+        <p>It runs on GitHub Actions across 20 parallel workers, each running 4 native-Rust threads. Each thread checks ~700,000 keys per second using the <code>k256</code> crate with batched modular inversion — N projective-coordinate points are accumulated via cheap Jacobian additions, then converted to affine in a single Montgomery-trick pass that amortizes one field inversion across the whole batch. No server, no cloud bill, no external API calls — just math.</p>
       </div>
     </section>
 
@@ -93,9 +93,9 @@
       <div class="status-grid">
         <div class="status-row"><span class="status-label">Active workers</span><span class="status-value">20</span></div>
         <div class="status-row"><span class="status-label">Threads per worker</span><span class="status-value">4</span></div>
-        <div class="status-row"><span class="status-label">Per-thread rate</span><span class="status-value">~185,600 keys/sec</span></div>
+        <div class="status-row"><span class="status-label">Per-thread rate</span><span class="status-value">~700,000 keys/sec</span></div>
         <div class="status-row"><span class="status-label">Schedule</span><span class="status-value">Every 6 hours</span></div>
-        <div class="status-row"><span class="status-label">Implementation</span><span class="status-value">Native Rust addon (napi-rs)</span></div>
+        <div class="status-row"><span class="status-label">Implementation</span><span class="status-value">k256 batched inversion (napi-rs)</span></div>
         <div class="status-row"><span class="status-label">Last stats sync</span><span class="status-value" id="last-update">—</span></div>
       </div>
     </section>
