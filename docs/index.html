@@ -29,17 +29,17 @@
     <section class="cards">
       <div class="card">
         <div class="card-label">Per second</div>
-        <div class="card-value">62.2 M</div>
+        <div class="card-value">65.8 M</div>
         <div class="card-detail">across 80 native-Rust threads</div>
       </div>
       <div class="card">
         <div class="card-label">Per day</div>
-        <div class="card-value">5.22 T</div>
+        <div class="card-value">5.53 T</div>
         <div class="card-detail">when all workers active</div>
       </div>
       <div class="card">
         <div class="card-label">Per year</div>
-        <div class="card-value card-value--long">1.91 quadrillion</div>
+        <div class="card-value card-value--long">2.02 quadrillion</div>
         <div class="card-detail">at the current rate</div>
       </div>
     </section>
@@ -73,8 +73,8 @@
     <section class="scale">
       <h2>For scale</h2>
       <ul class="scale-list">
-        <li><strong>5.22 trillion keys/day</strong> — about 26× the number of stars in the Milky Way, every day.</li>
-        <li><strong>The Milky Way has ~200 billion stars.</strong> We check that many keys every 3.2 seconds.</li>
+        <li><strong>5.53 trillion keys/day</strong> — about 28× the number of stars in the Milky Way, every day.</li>
+        <li><strong>The Milky Way has ~200 billion stars.</strong> We check that many keys every 3.0 seconds.</li>
         <li><strong>The universe is ~13.8 billion years old.</strong> Expected time to find a match is ~10<sup>47</sup> times that.</li>
         <li><strong>Even at maximum theoretical optimization</strong> — full GPU farm, every CPU on Earth — finding a key is closer to confirming Bitcoin works than threatening it.</li>
       </ul>
@@ -84,7 +84,7 @@
       <h2>How it works</h2>
       <div class="prose">
         <p>Each spin draws a cryptographically random 256-bit number and treats it as a Bitcoin private key. From that, secp256k1 elliptic-curve math derives a public key, then SHA-256 and RIPEMD-160 produce a 20-byte hash160. That hash gets compared against a local list of ~22,000 Patoshi-pattern addresses — the wallets widely attributed to Satoshi.</p>
-        <p>It runs on GitHub Actions across 20 parallel workers, each running 4 native-Rust threads. Each thread checks ~785,000 keys per second using the <code>k256</code> crate with batched modular inversion — N projective-coordinate points are accumulated via cheap Jacobian additions, then converted to affine in a single Montgomery-trick pass that amortizes one field inversion across the whole batch. The post-EC hashing stage uses <code>sha2</code> with SHA-NI hardware acceleration, then a hand-rolled 8-way AVX2 RIPEMD-160 that processes 8 candidates per SIMD instruction. No server, no cloud bill, no external API calls — just math.</p>
+        <p>It runs on GitHub Actions across 20 parallel workers, each running 4 native-Rust threads. Each thread checks ~830,000 keys per second using the <code>k256</code> crate with batched modular inversion — N projective-coordinate points are accumulated via cheap Jacobian additions, then converted to affine in a single Montgomery-trick pass that amortizes one field inversion across the whole batch. The post-EC hashing stage uses <code>sha2</code> with SHA-NI hardware acceleration, then a hand-rolled 8-way AVX2 RIPEMD-160 that processes 8 candidates per SIMD instruction. No server, no cloud bill, no external API calls — just math.</p>
       </div>
     </section>
 
@@ -93,7 +93,7 @@
       <div class="status-grid">
         <div class="status-row"><span class="status-label">Active workers</span><span class="status-value">20</span></div>
         <div class="status-row"><span class="status-label">Threads per worker</span><span class="status-value">4</span></div>
-        <div class="status-row"><span class="status-label">Per-thread rate</span><span class="status-value">~785,000 keys/sec</span></div>
+        <div class="status-row"><span class="status-label">Per-thread rate</span><span class="status-value">~830,000 keys/sec</span></div>
         <div class="status-row"><span class="status-label">Schedule</span><span class="status-value">Every 6 hours</span></div>
         <div class="status-row"><span class="status-label">Implementation</span><span class="status-value">k256 batched inversion + 8-way AVX2 RIPEMD-160</span></div>
         <div class="status-row"><span class="status-label">Last stats sync</span><span class="status-value" id="last-update">—</span></div>

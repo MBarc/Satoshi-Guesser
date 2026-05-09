@@ -10,7 +10,7 @@
 //   Phase 2 (post-f507834):   ~75 billion keys/day     — native secp256k1 binding
 //   Phase 3 (post-Plan 8):    ~1.25 trillion keys/day  — native Rust addon, per-step combine
 //   Phase 4 (post-PR #2):     ~4.69 trillion keys/day  — k256 batched inversion, BATCH_SIZE=8192
-//   Phase 5 (post-PR #3):     ~5.22 trillion keys/day  — 8-way AVX2 RIPEMD-160
+//   Phase 5 (post-PR #3):     ~5.53 trillion keys/day  — 8-way AVX2 RIPEMD-160
 //
 // When the weekly stats workflow has populated stats.json with a real
 // cumulative total, that value overrides the estimate and the counter
@@ -32,7 +32,7 @@ const RATES_PER_DAY = {
   phase2: 75e9,
   phase3: 1.25e12,
   phase4: 4.69e12,
-  phase5: 5.22e12,
+  phase5: 5.53e12,
 };
 
 const SECONDS_PER_DAY = 86_400;
