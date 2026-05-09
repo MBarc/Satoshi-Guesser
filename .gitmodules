@@ -1,0 +1,3 @@
+[submodule "native/c-wrapper/libsecp256k1"]
+	path = native/c-wrapper/libsecp256k1
+	url = https://github.com/bitcoin-core/secp256k1
