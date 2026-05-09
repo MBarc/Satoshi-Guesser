@@ -165,6 +165,10 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+.card-value--long {
+  font-size: 26px;
+}
+
 .card-detail {
   font-size: 13px;
   color: var(--text-muted);
