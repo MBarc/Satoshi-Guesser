@@ -34,7 +34,7 @@ All of this runs inside the GitHub runner. No external API calls, no blockchain 
 
 ## Why GitHub Actions
 
-Running 20 parallel jobs on GitHub's infrastructure costs nothing for public repos. Each job runs for just under 6 hours before the next scheduled trigger fires and spins up a fresh batch. Across all workers you get roughly 6.87 trillion keys checked per day.
+Running 20 parallel jobs on GitHub's infrastructure costs nothing for public repos. Each job runs for just under 6 hours before the next scheduled trigger fires and spins up a fresh batch. Across all workers you get roughly 7.42 trillion keys checked per day.
 
 Hits go only to your webhook URL, which GitHub stores as an encrypted secret. Nothing useful gets written to the public logs.
 
@@ -50,7 +50,7 @@ Last updated May 10, 2026
 
 ```
 Keyspace:       2^256  ~  1.16 x 10^77
-Keys per day:          ~  6.87 x 10^12
+Keys per day:          ~  7.42 x 10^12
 Time to cover 1%:      ~  10^60 years
 ```
 
