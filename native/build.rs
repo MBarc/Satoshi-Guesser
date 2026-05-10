@@ -27,11 +27,13 @@ fn main() {
         .define("USE_FORCE_WIDEMUL_INT128", Some("1"))
         .define("SECP256K1_BUILD", None);
 
-    // ripemd160_8way uses AVX2 intrinsics; libsecp internals benefit from the
-    // same baseline. Production runners are Xeon Platinum 8370C (avx2, sha_ni,
-    // avx512), so AVX2 is always available.
+    // ripemd160_8way uses AVX2 intrinsics; sha256_pubkey_ni uses Intel SHA
+    // extensions (-msha enables _mm_sha256rnds2_epu32 etc.). Production
+    // runners are Xeon Platinum 8370C (avx2, sha_ni, avx512), so both are
+    // always available. -msse4.1 is implied by -mavx2 but spelled explicitly
+    // since SHA-NI depends on it.
     if !cfg!(target_os = "windows") {
-        build.flag("-mavx2");
+        build.flag("-mavx2").flag("-msha").flag("-msse4.1");
     }
 
     build.compile("sgn_wrapper");
