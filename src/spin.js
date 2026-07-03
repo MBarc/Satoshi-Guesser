@@ -34,8 +34,11 @@ for (let i = 0; i < THREAD_COUNT; i++) {
       console.log(`Worker ${WORKER_ID} | MATCH: ${msg.address}`);
       writeFileSync(`worker-${WORKER_ID}-count.txt`, String(totalCount), 'utf-8');
       for (const t of threads) if (t !== thread) t.terminate();
-      await notifyHit(msg.privKeyHex, msg.address, msg.wifUncompressed, msg.wifCompressed);
-      process.exit(0);
+      // notifyHit retries until the key is delivered (or dumped to the log as a
+      // last resort), so it only resolves once the key is safely out. Do not
+      // exit before then — this is the one moment the whole run exists for.
+      const delivered = await notifyHit(msg.privKeyHex, msg.address, msg.wifUncompressed, msg.wifCompressed);
+      if (delivered) process.exit(0);
 
     } else if (msg.type === 'done') {
       totalCount += msg.count;
