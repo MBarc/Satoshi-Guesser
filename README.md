@@ -39,8 +39,8 @@ Running 20 parallel jobs on GitHub's infrastructure costs nothing for public rep
 Hits go only to your webhook URL, which GitHub stores as an encrypted secret. Nothing useful gets written to the public logs.
 
 <!-- STATS -->
-Total keys checked: **453,050,882,141,853**
-Last updated July 12, 2026
+Total keys checked: **504,379,804,495,517**
+Last updated July 19, 2026
 <!-- /STATS -->
 *Updates every Sunday via an automated commit.*
 
