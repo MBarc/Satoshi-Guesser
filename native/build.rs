@@ -34,6 +34,7 @@ fn main() {
     // since SHA-NI depends on it.
     if !cfg!(target_os = "windows") {
         build.flag("-mavx2").flag("-msha").flag("-msse4.1");
+        build.flag("-mtune=znver4"); // EXPERIMENT: tune for Zen4 runners (9V45/9V74)
     }
 
     build.compile("sgn_wrapper");
