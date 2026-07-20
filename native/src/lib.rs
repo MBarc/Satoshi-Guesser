@@ -39,6 +39,10 @@ extern "C" {
     /// pubkey -> 32-byte digest.
     fn sha256_pubkey_ni(out: *mut u8, pub65: *const u8);
 
+    /// 2-way interleaved SHA-NI: hashes two 65-byte pubkeys at once into two
+    /// 32-byte digests. Overlaps the two sha256rnds2 chains to hide latency.
+    fn sha256_pubkey_ni_2way(out0: *mut u8, out1: *mut u8, pub0: *const u8, pub1: *const u8);
+
     /// Initialize the process-global target table. Idempotent.
     fn sgn_set_targets(targets: *const u8, n_targets: u32);
 
@@ -252,6 +256,31 @@ mod tests {
                 "SHA-NI disagrees with sha2 crate on pub65 {}",
                 hex::encode(p)
             );
+        }
+    }
+
+    /// 2-way SHA-NI must match the sha2 crate on both lanes for random pubkeys.
+    #[test]
+    fn sha_ni_2way_matches_sha2_crate() {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+        for _ in 0..64 {
+            let mut p0 = [0u8; 65];
+            let mut p1 = [0u8; 65];
+            rng.fill_bytes(&mut p0);
+            rng.fill_bytes(&mut p1);
+            p0[0] = 0x04;
+            p1[0] = 0x04;
+
+            let mut got0 = [0u8; 32];
+            let mut got1 = [0u8; 32];
+            unsafe {
+                sha256_pubkey_ni_2way(got0.as_mut_ptr(), got1.as_mut_ptr(), p0.as_ptr(), p1.as_ptr())
+            };
+            let exp0: [u8; 32] = Sha256::digest(p0).into();
+            let exp1: [u8; 32] = Sha256::digest(p1).into();
+            assert_eq!(got0, exp0, "2-way SHA lane 0 mismatch");
+            assert_eq!(got1, exp1, "2-way SHA lane 1 mismatch");
         }
     }
 

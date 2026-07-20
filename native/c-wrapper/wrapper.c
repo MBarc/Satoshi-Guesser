@@ -719,6 +719,228 @@ void sha256_pubkey_ni(uint8_t out[32], const uint8_t pub65[65]) {
     sha256_ni_store_state(state0, state1, out);
 }
 
+/* ---- 2-way interleaved SHA-NI --------------------------------------------
+ * Two independent SHA-256 streams share the instruction stream: every step is
+ * emitted for stream 0 then stream 1, so the two dependent sha256rnds2 chains
+ * overlap and the ~4-cycle rnds2 latency is hidden by the other stream's work
+ * (the port accepts one rnds2 roughly every 2 cycles). Identical code runs for
+ * both lanes via the TWO() wrapper, so the streams can never diverge. */
+
+#define TWO(...) do { for (int S = 0; S < 2; S++) { __VA_ARGS__ } } while (0)
+
+static void sha256_ni_compress_2way(
+    __m128i state0[2], __m128i state1[2],
+    const uint8_t* blockA, const uint8_t* blockB
+) {
+    const uint8_t* blk[2] = { blockA, blockB };
+    __m128i msg[2], tmp[2], msg0[2], msg1[2], msg2[2], msg3[2];
+    __m128i s0save[2], s1save[2];
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    TWO( s0save[S] = state0[S]; s1save[S] = state1[S]; );
+
+    /* Rounds 0-3 */
+    TWO( msg[S] = _mm_loadu_si128((const __m128i*)(blk[S] + 0));
+         msg0[S] = _mm_shuffle_epi8(msg[S], bswap);
+         msg[S] = _mm_add_epi32(msg0[S], _mm_set_epi64x(0xE9B5DBA5B5C0FBCFULL, 0x71374491428A2F98ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+
+    /* Rounds 4-7 */
+    TWO( msg[S] = _mm_loadu_si128((const __m128i*)(blk[S] + 16));
+         msg1[S] = _mm_shuffle_epi8(msg[S], bswap);
+         msg[S] = _mm_add_epi32(msg1[S], _mm_set_epi64x(0xAB1C5ED5923F82A4ULL, 0x59F111F13956C25BULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg0[S] = _mm_sha256msg1_epu32(msg0[S], msg1[S]); );
+
+    /* Rounds 8-11 */
+    TWO( msg[S] = _mm_loadu_si128((const __m128i*)(blk[S] + 32));
+         msg2[S] = _mm_shuffle_epi8(msg[S], bswap);
+         msg[S] = _mm_add_epi32(msg2[S], _mm_set_epi64x(0x550C7DC3243185BEULL, 0x12835B01D807AA98ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg1[S] = _mm_sha256msg1_epu32(msg1[S], msg2[S]); );
+
+    /* Rounds 12-15 */
+    TWO( msg[S] = _mm_loadu_si128((const __m128i*)(blk[S] + 48));
+         msg3[S] = _mm_shuffle_epi8(msg[S], bswap);
+         msg[S] = _mm_add_epi32(msg3[S], _mm_set_epi64x(0xC19BF1749BDC06A7ULL, 0x80DEB1FE72BE5D74ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg3[S], msg2[S], 4);
+         msg0[S] = _mm_add_epi32(msg0[S], tmp[S]);
+         msg0[S] = _mm_sha256msg2_epu32(msg0[S], msg3[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg2[S] = _mm_sha256msg1_epu32(msg2[S], msg3[S]); );
+
+    /* Rounds 16-19 */
+    TWO( msg[S] = _mm_add_epi32(msg0[S], _mm_set_epi64x(0x240CA1CC0FC19DC6ULL, 0xEFBE4786E49B69C1ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg0[S], msg3[S], 4);
+         msg1[S] = _mm_add_epi32(msg1[S], tmp[S]);
+         msg1[S] = _mm_sha256msg2_epu32(msg1[S], msg0[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg3[S] = _mm_sha256msg1_epu32(msg3[S], msg0[S]); );
+
+    /* Rounds 20-23 */
+    TWO( msg[S] = _mm_add_epi32(msg1[S], _mm_set_epi64x(0x76F988DA5CB0A9DCULL, 0x4A7484AA2DE92C6FULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg1[S], msg0[S], 4);
+         msg2[S] = _mm_add_epi32(msg2[S], tmp[S]);
+         msg2[S] = _mm_sha256msg2_epu32(msg2[S], msg1[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg0[S] = _mm_sha256msg1_epu32(msg0[S], msg1[S]); );
+
+    /* Rounds 24-27 */
+    TWO( msg[S] = _mm_add_epi32(msg2[S], _mm_set_epi64x(0xBF597FC7B00327C8ULL, 0xA831C66D983E5152ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg2[S], msg1[S], 4);
+         msg3[S] = _mm_add_epi32(msg3[S], tmp[S]);
+         msg3[S] = _mm_sha256msg2_epu32(msg3[S], msg2[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg1[S] = _mm_sha256msg1_epu32(msg1[S], msg2[S]); );
+
+    /* Rounds 28-31 */
+    TWO( msg[S] = _mm_add_epi32(msg3[S], _mm_set_epi64x(0x1429296706CA6351ULL, 0xD5A79147C6E00BF3ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg3[S], msg2[S], 4);
+         msg0[S] = _mm_add_epi32(msg0[S], tmp[S]);
+         msg0[S] = _mm_sha256msg2_epu32(msg0[S], msg3[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg2[S] = _mm_sha256msg1_epu32(msg2[S], msg3[S]); );
+
+    /* Rounds 32-35 */
+    TWO( msg[S] = _mm_add_epi32(msg0[S], _mm_set_epi64x(0x53380D134D2C6DFCULL, 0x2E1B213827B70A85ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg0[S], msg3[S], 4);
+         msg1[S] = _mm_add_epi32(msg1[S], tmp[S]);
+         msg1[S] = _mm_sha256msg2_epu32(msg1[S], msg0[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg3[S] = _mm_sha256msg1_epu32(msg3[S], msg0[S]); );
+
+    /* Rounds 36-39 */
+    TWO( msg[S] = _mm_add_epi32(msg1[S], _mm_set_epi64x(0x92722C8581C2C92EULL, 0x766A0ABB650A7354ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg1[S], msg0[S], 4);
+         msg2[S] = _mm_add_epi32(msg2[S], tmp[S]);
+         msg2[S] = _mm_sha256msg2_epu32(msg2[S], msg1[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg0[S] = _mm_sha256msg1_epu32(msg0[S], msg1[S]); );
+
+    /* Rounds 40-43 */
+    TWO( msg[S] = _mm_add_epi32(msg2[S], _mm_set_epi64x(0xC76C51A3C24B8B70ULL, 0xA81A664BA2BFE8A1ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg2[S], msg1[S], 4);
+         msg3[S] = _mm_add_epi32(msg3[S], tmp[S]);
+         msg3[S] = _mm_sha256msg2_epu32(msg3[S], msg2[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg1[S] = _mm_sha256msg1_epu32(msg1[S], msg2[S]); );
+
+    /* Rounds 44-47 */
+    TWO( msg[S] = _mm_add_epi32(msg3[S], _mm_set_epi64x(0x106AA070F40E3585ULL, 0xD6990624D192E819ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg3[S], msg2[S], 4);
+         msg0[S] = _mm_add_epi32(msg0[S], tmp[S]);
+         msg0[S] = _mm_sha256msg2_epu32(msg0[S], msg3[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg2[S] = _mm_sha256msg1_epu32(msg2[S], msg3[S]); );
+
+    /* Rounds 48-51 */
+    TWO( msg[S] = _mm_add_epi32(msg0[S], _mm_set_epi64x(0x34B0BCB52748774CULL, 0x1E376C0819A4C116ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg0[S], msg3[S], 4);
+         msg1[S] = _mm_add_epi32(msg1[S], tmp[S]);
+         msg1[S] = _mm_sha256msg2_epu32(msg1[S], msg0[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+    TWO( msg3[S] = _mm_sha256msg1_epu32(msg3[S], msg0[S]); );
+
+    /* Rounds 52-55 */
+    TWO( msg[S] = _mm_add_epi32(msg1[S], _mm_set_epi64x(0x682E6FF35B9CCA4FULL, 0x4ED8AA4A391C0CB3ULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg1[S], msg0[S], 4);
+         msg2[S] = _mm_add_epi32(msg2[S], tmp[S]);
+         msg2[S] = _mm_sha256msg2_epu32(msg2[S], msg1[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+
+    /* Rounds 56-59 */
+    TWO( msg[S] = _mm_add_epi32(msg2[S], _mm_set_epi64x(0x8CC7020884C87814ULL, 0x78A5636F748F82EEULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( tmp[S] = _mm_alignr_epi8(msg2[S], msg1[S], 4);
+         msg3[S] = _mm_add_epi32(msg3[S], tmp[S]);
+         msg3[S] = _mm_sha256msg2_epu32(msg3[S], msg2[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+
+    /* Rounds 60-63 */
+    TWO( msg[S] = _mm_add_epi32(msg3[S], _mm_set_epi64x(0xC67178F2BEF9A3F7ULL, 0xA4506CEB90BEFFFAULL)); );
+    TWO( state1[S] = _mm_sha256rnds2_epu32(state1[S], state0[S], msg[S]); );
+    TWO( msg[S] = _mm_shuffle_epi32(msg[S], 0x0E); );
+    TWO( state0[S] = _mm_sha256rnds2_epu32(state0[S], state1[S], msg[S]); );
+
+    TWO( state0[S] = _mm_add_epi32(state0[S], s0save[S]);
+         state1[S] = _mm_add_epi32(state1[S], s1save[S]); );
+}
+
+/* SHA-256 of two 65-byte uncompressed pubkeys at once (2-way SHA-NI). */
+void sha256_pubkey_ni_2way(uint8_t out0[32], uint8_t out1[32],
+                           const uint8_t pub0[65], const uint8_t pub1[65]) {
+    __m128i state0[2], state1[2];
+    sha256_ni_load_state(&state0[0], &state1[0]);
+    sha256_ni_load_state(&state0[1], &state1[1]);
+
+    sha256_ni_compress_2way(state0, state1, pub0, pub1);
+
+    uint8_t block2[2][64];
+    const uint8_t* pub[2] = { pub0, pub1 };
+    for (int S = 0; S < 2; S++) {
+        memset(block2[S], 0, 64);
+        block2[S][0]  = pub[S][64];
+        block2[S][1]  = 0x80;
+        block2[S][62] = 0x02;   /* 520-bit length, big-endian */
+        block2[S][63] = 0x08;
+    }
+    sha256_ni_compress_2way(state0, state1, block2[0], block2[1]);
+
+    sha256_ni_store_state(state0[0], state1[0], out0);
+    sha256_ni_store_state(state0[1], state1[1], out1);
+}
+
+#undef TWO
+
+/* Hash 8 candidate pubkeys via four 2-way SHA-NI calls and pack each digest
+ * into sha_out[lane][w] as little-endian words (the layout sgn_check_group8
+ * transposes for 8-way RIPEMD). */
+static inline void sha256_pubkey_8way_ni(const uint8_t* pub_8x65, uint32_t sha_out[8][8]) {
+    uint8_t d[8][32];
+    for (int p = 0; p < 4; p++) {
+        sha256_pubkey_ni_2way(d[2 * p], d[2 * p + 1],
+                              pub_8x65 + (size_t)(2 * p) * 65,
+                              pub_8x65 + (size_t)(2 * p + 1) * 65);
+    }
+    for (int L = 0; L < 8; L++) {
+        for (int w = 0; w < 8; w++) {
+            sha_out[L][w] =
+                ((uint32_t)d[L][w * 4 + 0])
+              | ((uint32_t)d[L][w * 4 + 1] << 8)
+              | ((uint32_t)d[L][w * 4 + 2] << 16)
+              | ((uint32_t)d[L][w * 4 + 3] << 24);
+        }
+    }
+}
+
 #else
 #error "SHA-NI is required to build the consolidated hot path"
 #endif
@@ -1435,11 +1657,11 @@ int sgn_search_batch(
     }
     g_dx[0] = acc;   /* g_dx[j] now holds 1/(gnx[j]-Cx) */
 
-    /* Stream candidates through SHA-NI, feeding every 8 into the 8-way RIPEMD
-     * group check. For each base point (C ± (j+1)G) we emit 6 candidates: the
-     * three GLV x-images {x, beta*x, beta^2*x} times both y-signs {y, -y}. */
-    uint8_t pub65[65];
-    pub65[0] = 0x04;
+    /* Accumulate candidate pubkeys 8 at a time into pub_8x65, then hash the
+     * group with four 2-way SHA-NI calls and run the 8-way RIPEMD group check.
+     * For each base point (C ± (j+1)G) we emit 6 candidates: the three GLV
+     * x-images {x, beta*x, beta^2*x} times both y-signs {y, -y}. */
+    uint8_t pub_8x65[8 * 65];
     uint32_t sha_out[8][8];
     uint32_t off8[8];
     uint32_t var8[8];
@@ -1492,23 +1714,16 @@ int sgn_search_batch(
 
             for (uint32_t pw = 0; pw < 3; pw++) {         /* endomorphism power */
                 for (uint32_t sy = 0; sy < 2; sy++) {     /* y-sign */
-                    memcpy(pub65 + 1,  xb[pw], 32);
-                    memcpy(pub65 + 33, yb[sy], 32);
-
-                    uint8_t sha_bytes[32];
-                    sha256_pubkey_ni(sha_bytes, pub65);
-                    for (int w = 0; w < 8; w++) {
-                        sha_out[lane][w] =
-                            ((uint32_t)sha_bytes[w * 4 + 0])
-                          | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
-                          | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
-                          | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
-                    }
+                    uint8_t* pk = pub_8x65 + (size_t)lane * 65;
+                    pk[0] = 0x04;
+                    memcpy(pk + 1,  xb[pw], 32);
+                    memcpy(pk + 33, yb[sy], 32);
                     off8[lane] = off;
                     var8[lane] = (pw << 1) | sy;
                     lane++;
 
                     if (lane == 8) {
+                        sha256_pubkey_8way_ni(pub_8x65, sha_out);
                         if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
                         lane = 0;
                     }
@@ -1522,10 +1737,11 @@ int sgn_search_batch(
      * meant to check, so it can never fabricate a spurious match. */
     if (lane > 0) {
         for (int q = lane; q < 8; q++) {
-            memcpy(sha_out[q], sha_out[lane - 1], sizeof(sha_out[0]));
+            memcpy(pub_8x65 + (size_t)q * 65, pub_8x65 + (size_t)(lane - 1) * 65, 65);
             off8[q] = off8[lane - 1];
             var8[q] = var8[lane - 1];
         }
+        sha256_pubkey_8way_ni(pub_8x65, sha_out);
         if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
     }
 
