@@ -724,6 +724,159 @@ void sha256_pubkey_ni(uint8_t out[32], const uint8_t pub65[65]) {
 #endif
 
 /* ===============================================================
+ * 8-way AVX2 SHA-256
+ *
+ * Hashes 8 uncompressed pubkeys (65 bytes each) in parallel across the lanes
+ * of AVX2 registers and writes the result already transposed + byte-swapped
+ * into the 8-way RIPEMD-160 input layout — folding the SHA compress, the
+ * per-candidate byte packing, and the SHA->RIPEMD transpose into one pass.
+ * The affine+endomorphism hot path emits candidates in groups of 8, so this
+ * replaces the per-candidate SHA-NI stream there. SHA-NI (above) is retained
+ * for the scalar reference path. Adapted from the feat/multi-buffer-sha256
+ * experiment (incl. its unaligned-store SIGSEGV fix). SHA-256 spec: FIPS 180-4.
+ * =============================================================== */
+
+#if defined(__AVX2__)
+
+static const uint32_t SGN_SHA256_K[64] = {
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+};
+
+static const uint32_t SGN_SHA256_8WAY_IV[8] = {
+    0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+    0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+};
+
+#define SHA_ROTR(x, n) _mm256_or_si256(_mm256_srli_epi32((x), (n)), _mm256_slli_epi32((x), 32 - (n)))
+#define SHA_SHR(x, n)  _mm256_srli_epi32((x), (n))
+#define SHA_CH(x, y, z)  _mm256_xor_si256(_mm256_and_si256((x), (y)), _mm256_andnot_si256((x), (z)))
+/* Maj(x,y,z) = ((x ^ y) & z) ^ (x & y) — equivalent to standard form, one fewer AND */
+#define SHA_MAJ(x, y, z) _mm256_xor_si256(_mm256_and_si256(_mm256_xor_si256((x), (y)), (z)), _mm256_and_si256((x), (y)))
+#define SHA_BSIG0(x) _mm256_xor_si256(_mm256_xor_si256(SHA_ROTR((x), 2),  SHA_ROTR((x), 13)), SHA_ROTR((x), 22))
+#define SHA_BSIG1(x) _mm256_xor_si256(_mm256_xor_si256(SHA_ROTR((x), 6),  SHA_ROTR((x), 11)), SHA_ROTR((x), 25))
+#define SHA_SSIG0(x) _mm256_xor_si256(_mm256_xor_si256(SHA_ROTR((x), 7),  SHA_ROTR((x), 18)), SHA_SHR((x), 3))
+#define SHA_SSIG1(x) _mm256_xor_si256(_mm256_xor_si256(SHA_ROTR((x), 17), SHA_ROTR((x), 19)), SHA_SHR((x), 10))
+
+#define SHA_ROUND(a, b, c, d, e, f, g, h, kw) do {                              \
+    __m256i T1 = _mm256_add_epi32(                                              \
+        _mm256_add_epi32(_mm256_add_epi32((h), SHA_BSIG1(e)),                   \
+                         SHA_CH((e), (f), (g))),                                \
+        (kw));                                                                  \
+    __m256i T2 = _mm256_add_epi32(SHA_BSIG0(a), SHA_MAJ((a), (b), (c)));        \
+    (h) = (g); (g) = (f); (f) = (e);                                            \
+    (e) = _mm256_add_epi32((d), T1);                                            \
+    (d) = (c); (c) = (b); (b) = (a);                                            \
+    (a) = _mm256_add_epi32(T1, T2);                                             \
+} while (0)
+
+static inline __m256i sha_bswap32_8way(__m256i v) {
+    const __m256i mask = _mm256_set_epi8(
+        12,13,14,15, 8,9,10,11, 4,5,6,7, 0,1,2,3,
+        12,13,14,15, 8,9,10,11, 4,5,6,7, 0,1,2,3);
+    return _mm256_shuffle_epi8(v, mask);
+}
+
+/* Run the 64-round SHA-256 compress on state[0..7] using message schedule
+ * W[0..63]. state is read+written in place; W is read-only. */
+static inline void sha256_8way_compress(__m256i state[8], const __m256i W[64]) {
+    __m256i a = state[0], b = state[1], c = state[2], d = state[3];
+    __m256i e = state[4], f = state[5], g = state[6], h = state[7];
+
+    for (int i = 0; i < 64; i++) {
+        __m256i kw = _mm256_add_epi32(W[i], _mm256_set1_epi32((int)SGN_SHA256_K[i]));
+        SHA_ROUND(a, b, c, d, e, f, g, h, kw);
+    }
+
+    state[0] = _mm256_add_epi32(state[0], a);
+    state[1] = _mm256_add_epi32(state[1], b);
+    state[2] = _mm256_add_epi32(state[2], c);
+    state[3] = _mm256_add_epi32(state[3], d);
+    state[4] = _mm256_add_epi32(state[4], e);
+    state[5] = _mm256_add_epi32(state[5], f);
+    state[6] = _mm256_add_epi32(state[6], g);
+    state[7] = _mm256_add_epi32(state[7], h);
+}
+
+/* Extend message schedule W[0..15] (already filled) to W[0..63]. */
+static inline void sha256_8way_extend(__m256i W[64]) {
+    for (int i = 16; i < 64; i++) {
+        W[i] = _mm256_add_epi32(
+            _mm256_add_epi32(SHA_SSIG1(W[i - 2]), W[i - 7]),
+            _mm256_add_epi32(SHA_SSIG0(W[i - 15]), W[i - 16])
+        );
+    }
+}
+
+/* SHA-256 of 8 × 65-byte uncompressed pubkeys.
+ * Input:  pub_8x65[j*65..(j+1)*65] = stream j's 65-byte pubkey (0x04 prefix).
+ * Output: 256 bytes; bytes [w*32..(w+1)*32] hold the byte-swapped (RIPEMD-160
+ *         LE message-word) SHA state word w for all 8 streams — directly the
+ *         __m256i X[0..7] the 8-way RIPEMD reads. Unaligned stores let callers
+ *         pass any buffer (production passes an aligned __m256i[8]). */
+void sha256_pubkey_8way(const uint8_t* pub_8x65, uint8_t* out) {
+    __m256i state[8];
+    for (int i = 0; i < 8; i++) {
+        state[i] = _mm256_set1_epi32((int)SGN_SHA256_8WAY_IV[i]);
+    }
+
+    __m256i W[64];
+
+    /* ===== BLOCK 1: bytes [0..64) of each stream ===== */
+    {
+        __m256i lo[8], hi[8];
+        for (int j = 0; j < 8; j++) {
+            const uint8_t* p = pub_8x65 + (size_t)j * 65;
+            __m256i lo_le = _mm256_loadu_si256((const __m256i*)(p +  0));
+            __m256i hi_le = _mm256_loadu_si256((const __m256i*)(p + 32));
+            lo[j] = sha_bswap32_8way(lo_le);
+            hi[j] = sha_bswap32_8way(hi_le);
+        }
+        transpose_8x8(lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], W);
+        transpose_8x8(hi[0], hi[1], hi[2], hi[3], hi[4], hi[5], hi[6], hi[7], W + 8);
+    }
+    sha256_8way_extend(W);
+    sha256_8way_compress(state, W);
+
+    /* ===== BLOCK 2: byte 64 + 0x80 pad + 64-bit BE length (520 bits) ===== */
+    {
+        uint32_t w0_vals[8];
+        for (int j = 0; j < 8; j++) {
+            w0_vals[j] = ((uint32_t)pub_8x65[(size_t)j * 65 + 64] << 24) | 0x00800000u;
+        }
+        W[0] = _mm256_loadu_si256((const __m256i*)w0_vals);
+        for (int i = 1; i < 15; i++) W[i] = _mm256_setzero_si256();
+        W[14] = _mm256_setzero_si256();
+        W[15] = _mm256_set1_epi32(520);
+    }
+    sha256_8way_extend(W);
+    sha256_8way_compress(state, W);
+
+    for (int i = 0; i < 8; i++) {
+        _mm256_storeu_si256((__m256i*)(out + (size_t)i * 32),
+                            sha_bswap32_8way(state[i]));
+    }
+}
+
+#else
+#error "AVX2 is required to build the 8-way SHA-256 hot path"
+#endif
+
+/* ===============================================================
  * Target hashtable (open addressing, linear probe)
  *
  * Sized to a power of 2 with ~50% load factor on the caller's target count.
@@ -1245,50 +1398,19 @@ static const uint8_t SGN_LAMBDA_BE[32] = {
     0x53,0x63,0xad,0x4c,0xc0,0x5c,0x30,0xe0,0xa5,0x26,0x1c,0x02,0x88,0x12,0x64,0x5a,
     0x12,0x2e,0x22,0xea,0x20,0x81,0x66,0x78,0xdf,0x02,0x96,0x7c,0x1b,0x23,0xbd,0x72};
 
-/* Transpose 8 lanes of SHA-256 output into the 8-way RIPEMD input layout, run
- * RIPEMD-160, and check each hash160 against the target table. sha_out[lane][w]
- * holds lane's digest as 8 little-endian words. off[lane] is the base batch
+/* Run 8-way RIPEMD-160 on the pre-transposed SHA words X8 (as produced by
+ * sha256_pubkey_8way: X8[w] holds SHA state word w across all 8 lanes) and
+ * check each hash160 against the target table. off[lane] is the base batch
  * offset and var[lane] the GLV/negation variant (see above) for that lane; the
  * reported private key is derived from both. Returns 1 with out_match filled. */
 static inline int sgn_check_group8(
-    uint32_t sha_out[8][8],
+    const __m256i X8[8],
     const uint32_t off[8],
     const uint32_t var[8],
     const secp256k1_scalar* k0,
     const secp256k1_scalar* lambda,
     sgn_match_t* out_match
 ) {
-    __m256i a[8];
-    for (int j = 0; j < 8; j++) {
-        a[j] = _mm256_loadu_si256((const __m256i*)sha_out[j]);
-    }
-    __m256i X8[8];
-    {
-        __m256i s0 = _mm256_unpacklo_epi32(a[0], a[1]);
-        __m256i s1 = _mm256_unpackhi_epi32(a[0], a[1]);
-        __m256i s2 = _mm256_unpacklo_epi32(a[2], a[3]);
-        __m256i s3 = _mm256_unpackhi_epi32(a[2], a[3]);
-        __m256i s4 = _mm256_unpacklo_epi32(a[4], a[5]);
-        __m256i s5 = _mm256_unpackhi_epi32(a[4], a[5]);
-        __m256i s6 = _mm256_unpacklo_epi32(a[6], a[7]);
-        __m256i s7 = _mm256_unpackhi_epi32(a[6], a[7]);
-        __m256i u0 = _mm256_unpacklo_epi64(s0, s2);
-        __m256i u1 = _mm256_unpackhi_epi64(s0, s2);
-        __m256i u2 = _mm256_unpacklo_epi64(s1, s3);
-        __m256i u3 = _mm256_unpackhi_epi64(s1, s3);
-        __m256i u4 = _mm256_unpacklo_epi64(s4, s6);
-        __m256i u5 = _mm256_unpackhi_epi64(s4, s6);
-        __m256i u6 = _mm256_unpacklo_epi64(s5, s7);
-        __m256i u7 = _mm256_unpackhi_epi64(s5, s7);
-        X8[0] = _mm256_permute2x128_si256(u0, u4, 0x20);
-        X8[1] = _mm256_permute2x128_si256(u1, u5, 0x20);
-        X8[2] = _mm256_permute2x128_si256(u2, u6, 0x20);
-        X8[3] = _mm256_permute2x128_si256(u3, u7, 0x20);
-        X8[4] = _mm256_permute2x128_si256(u0, u4, 0x31);
-        X8[5] = _mm256_permute2x128_si256(u1, u5, 0x31);
-        X8[6] = _mm256_permute2x128_si256(u2, u6, 0x31);
-        X8[7] = _mm256_permute2x128_si256(u3, u7, 0x31);
-    }
 
     uint8_t h160_pack[8 * 20];
     sgn_ripemd_8way_inline(X8, h160_pack);
@@ -1435,12 +1557,12 @@ int sgn_search_batch(
     }
     g_dx[0] = acc;   /* g_dx[j] now holds 1/(gnx[j]-Cx) */
 
-    /* Stream candidates through SHA-NI, feeding every 8 into the 8-way RIPEMD
-     * group check. For each base point (C ± (j+1)G) we emit 6 candidates: the
-     * three GLV x-images {x, beta*x, beta^2*x} times both y-signs {y, -y}. */
-    uint8_t pub65[65];
-    pub65[0] = 0x04;
-    uint32_t sha_out[8][8];
+    /* Accumulate candidate pubkeys 8 at a time into pub_8x65, then hash the
+     * group with one 8-way AVX2 SHA-256 (output already in RIPEMD layout) and
+     * run the 8-way RIPEMD + target check. For each base point (C ± (j+1)G) we
+     * emit 6 candidates: the three GLV x-images {x, beta*x, beta^2*x} times both
+     * y-signs {y, -y}. */
+    uint8_t pub_8x65[8 * 65];
     uint32_t off8[8];
     uint32_t var8[8];
     int lane = 0;
@@ -1492,24 +1614,18 @@ int sgn_search_batch(
 
             for (uint32_t pw = 0; pw < 3; pw++) {         /* endomorphism power */
                 for (uint32_t sy = 0; sy < 2; sy++) {     /* y-sign */
-                    memcpy(pub65 + 1,  xb[pw], 32);
-                    memcpy(pub65 + 33, yb[sy], 32);
-
-                    uint8_t sha_bytes[32];
-                    sha256_pubkey_ni(sha_bytes, pub65);
-                    for (int w = 0; w < 8; w++) {
-                        sha_out[lane][w] =
-                            ((uint32_t)sha_bytes[w * 4 + 0])
-                          | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
-                          | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
-                          | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
-                    }
+                    uint8_t* pk = pub_8x65 + (size_t)lane * 65;
+                    pk[0] = 0x04;
+                    memcpy(pk + 1,  xb[pw], 32);
+                    memcpy(pk + 33, yb[sy], 32);
                     off8[lane] = off;
                     var8[lane] = (pw << 1) | sy;
                     lane++;
 
                     if (lane == 8) {
-                        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
+                        __m256i X8[8];
+                        sha256_pubkey_8way(pub_8x65, (uint8_t*)X8);
+                        if (sgn_check_group8(X8, off8, var8, &k0, &lambda, out_match)) return 1;
                         lane = 0;
                     }
                 }
@@ -1522,11 +1638,13 @@ int sgn_search_batch(
      * meant to check, so it can never fabricate a spurious match. */
     if (lane > 0) {
         for (int q = lane; q < 8; q++) {
-            memcpy(sha_out[q], sha_out[lane - 1], sizeof(sha_out[0]));
+            memcpy(pub_8x65 + (size_t)q * 65, pub_8x65 + (size_t)(lane - 1) * 65, 65);
             off8[q] = off8[lane - 1];
             var8[q] = var8[lane - 1];
         }
-        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
+        __m256i X8[8];
+        sha256_pubkey_8way(pub_8x65, (uint8_t*)X8);
+        if (sgn_check_group8(X8, off8, var8, &k0, &lambda, out_match)) return 1;
     }
 
     return 0;

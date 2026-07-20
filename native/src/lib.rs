@@ -39,6 +39,12 @@ extern "C" {
     /// pubkey -> 32-byte digest.
     fn sha256_pubkey_ni(out: *mut u8, pub65: *const u8);
 
+    /// 8-way AVX2 SHA-256 over 8 × 65-byte uncompressed pubkeys. Output is 256
+    /// bytes: bytes [w*32..(w+1)*32] hold the byte-swapped (little-endian) SHA
+    /// word w for all 8 streams — i.e. lane j's SHA byte [w*4..w*4+4] equals the
+    /// LE u32 at output bytes [w*32 + j*4 .. +4]. Feeds ripemd160_8way directly.
+    fn sha256_pubkey_8way(pub_8x65: *const u8, out: *mut u8);
+
     /// Initialize the process-global target table. Idempotent.
     fn sgn_set_targets(targets: *const u8, n_targets: u32);
 
@@ -289,6 +295,41 @@ mod tests {
                 let expected: [u8; 20] = Ripemd160::digest(input).into();
                 let got: [u8; 20] = packed_out[lane * 20..(lane + 1) * 20].try_into().unwrap();
                 assert_eq!(got, expected);
+            }
+        }
+    }
+
+    /// 8-way AVX2 SHA-256 must match the sha2 crate on each of its 8 lanes. The
+    /// output is transposed: lane j's digest word w (LE) is at output bytes
+    /// [w*32 + j*4 .. +4]. This is the layout ripemd160_8way consumes.
+    #[test]
+    fn sha256_8way_matches_sha2_crate() {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+
+        for _trial in 0..16 {
+            let mut pubs = [0u8; 8 * 65];
+            rng.fill_bytes(&mut pubs);
+            for j in 0..8 {
+                pubs[j * 65] = 0x04;
+            }
+
+            let mut out_bytes = [0u8; 8 * 32]; // 8 __m256i = 256 bytes
+            unsafe { sha256_pubkey_8way(pubs.as_ptr(), out_bytes.as_mut_ptr()) };
+
+            for lane in 0..8 {
+                let stream = &pubs[lane * 65..(lane + 1) * 65];
+                let sha_ref: [u8; 32] = Sha256::digest(stream).into();
+                for w in 0..8 {
+                    let expected =
+                        u32::from_le_bytes(sha_ref[w * 4..w * 4 + 4].try_into().unwrap());
+                    let off = w * 32 + lane * 4;
+                    let got = u32::from_le_bytes(out_bytes[off..off + 4].try_into().unwrap());
+                    assert_eq!(
+                        got, expected,
+                        "lane {lane} word {w}: got 0x{got:08x} expected 0x{expected:08x}"
+                    );
+                }
             }
         }
     }
