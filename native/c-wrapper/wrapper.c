@@ -1218,19 +1218,44 @@ int sgn_search_batch_ref(
  *   minus j -> off = half - (j+1)   -> keys k0 .. k0+half-1
  *   plus  j -> off = half + (j+1)   -> keys k0+half+1 .. k0+2*half
  * i.e. exactly n = 2*half consecutive keys centered on k0+half (the center key
- * itself is skipped — irrelevant for a uniform random search). The reported
- * priv = k0 + off matches the reference contract exactly, so the match/offset
- * semantics and the existing tests are unchanged.
+ * itself is skipped — irrelevant for a uniform random search).
+ *
+ * GLV endomorphism + negation (6 candidates per base point):
+ * secp256k1 has constants beta in F_p and lambda in F_n with (beta*x, y) =
+ * lambda*(x,y). So from one affine point (x,y) [priv k] we get six valid
+ * public keys essentially for free — three x-images {x, beta*x, beta^2*x} times
+ * two y-signs {y, -y} — with private keys {+/-k, +/-lambda*k, +/-lambda^2*k}.
+ * The expensive EC slope work amortizes over 6x as many hashed candidates, so
+ * the EC stage nearly vanishes and the pipeline becomes hash-bound.
+ *
+ * Variant encoding v in 0..5: p = v>>1 is the endomorphism power (0,1,2 -> x,
+ * beta*x, beta^2*x), s = v&1 is the y-sign (0 -> y, 1 -> -y). The private key of
+ * a matched candidate is  sign(s) * lambda^p * (k0 + off)  (mod n). Variant 0
+ * (p=0,s=0) reproduces the plain affine contract, so the earlier tests still
+ * hold; reported priv is always the exact key for the matched hash160.
  * =============================================================== */
+
+/* beta: nontrivial cube root of 1 in F_p. (beta*x, y) = lambda*(x, y). */
+static const secp256k1_fe SGN_BETA = SECP256K1_FE_CONST(
+    0x7ae96a2b, 0x657c0710, 0x6e64479e, 0xac3434e9,
+    0x9cf04975, 0x12f58995, 0xc1396c28, 0x719501ee);
+
+/* lambda: matching cube root of 1 in F_n (the group order), big-endian. */
+static const uint8_t SGN_LAMBDA_BE[32] = {
+    0x53,0x63,0xad,0x4c,0xc0,0x5c,0x30,0xe0,0xa5,0x26,0x1c,0x02,0x88,0x12,0x64,0x5a,
+    0x12,0x2e,0x22,0xea,0x20,0x81,0x66,0x78,0xdf,0x02,0x96,0x7c,0x1b,0x23,0xbd,0x72};
 
 /* Transpose 8 lanes of SHA-256 output into the 8-way RIPEMD input layout, run
  * RIPEMD-160, and check each hash160 against the target table. sha_out[lane][w]
- * holds lane's digest as 8 little-endian words. off[lane] is the batch offset
- * (priv = k0 + off) for that lane. Returns 1 with out_match filled on a hit. */
+ * holds lane's digest as 8 little-endian words. off[lane] is the base batch
+ * offset and var[lane] the GLV/negation variant (see above) for that lane; the
+ * reported private key is derived from both. Returns 1 with out_match filled. */
 static inline int sgn_check_group8(
     uint32_t sha_out[8][8],
     const uint32_t off[8],
+    const uint32_t var[8],
     const secp256k1_scalar* k0,
+    const secp256k1_scalar* lambda,
     sgn_match_t* out_match
 ) {
     __m256i a[8];
@@ -1274,10 +1299,17 @@ static inline int sgn_check_group8(
             out_match->found = 1;
             out_match->batch_offset = off[j];
             memcpy(out_match->hash160, h, 20);
-            secp256k1_scalar offset_scalar;
+            /* priv = sign(s) * lambda^p * (k0 + off), with p = var>>1, s = var&1. */
+            secp256k1_scalar offset_scalar, priv;
             secp256k1_scalar_set_int(&offset_scalar, off[j]);
-            secp256k1_scalar priv;
             secp256k1_scalar_add(&priv, k0, &offset_scalar);
+            uint32_t p = var[j] >> 1;
+            for (uint32_t i = 0; i < p; i++) {
+                secp256k1_scalar_mul(&priv, &priv, lambda);
+            }
+            if (var[j] & 1u) {
+                secp256k1_scalar_negate(&priv, &priv);
+            }
             secp256k1_scalar_get_b32(out_match->priv_key, &priv);
             return 1;
         }
@@ -1353,6 +1385,9 @@ int sgn_search_batch(
     secp256k1_scalar_set_b32(&k0, k0_bytes, &overflow);
     if (overflow || secp256k1_scalar_is_zero(&k0)) return 0;
 
+    secp256k1_scalar lambda;
+    secp256k1_scalar_set_b32(&lambda, SGN_LAMBDA_BE, NULL);
+
     /* Center scalar c = k0 + half; center point C = c*G. */
     secp256k1_scalar half_scalar, c;
     secp256k1_scalar_set_int(&half_scalar, half);
@@ -1401,11 +1436,13 @@ int sgn_search_batch(
     g_dx[0] = acc;   /* g_dx[j] now holds 1/(gnx[j]-Cx) */
 
     /* Stream candidates through SHA-NI, feeding every 8 into the 8-way RIPEMD
-     * group check. For each j emit the minus point (sign 0) then plus (sign 1). */
+     * group check. For each base point (C ± (j+1)G) we emit 6 candidates: the
+     * three GLV x-images {x, beta*x, beta^2*x} times both y-signs {y, -y}. */
     uint8_t pub65[65];
     pub65[0] = 0x04;
     uint32_t sha_out[8][8];
     uint32_t off8[8];
+    uint32_t var8[8];
     int lane = 0;
 
     for (uint32_t j = 0; j < half; j++) {
@@ -1438,38 +1475,58 @@ int sgn_search_batch(
             secp256k1_fe_add(&y3, &negCy);
             secp256k1_fe_normalize_var(&y3);
 
-            secp256k1_fe_get_b32(pub65 + 1,  &x3);
-            secp256k1_fe_get_b32(pub65 + 33, &y3);
+            const uint32_t off = sign ? (half + j + 1) : (half - j - 1);
 
-            uint8_t sha_bytes[32];
-            sha256_pubkey_ni(sha_bytes, pub65);
-            for (int w = 0; w < 8; w++) {
-                sha_out[lane][w] =
-                    ((uint32_t)sha_bytes[w * 4 + 0])
-                  | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
-                  | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
-                  | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
-            }
-            off8[lane] = sign ? (half + j + 1) : (half - j - 1);
-            lane++;
+            /* Serialize the 3 x-images and 2 y-signs once, reuse across variants. */
+            secp256k1_fe bx, b2x, ny3;
+            secp256k1_fe_mul(&bx, &x3, &SGN_BETA);   secp256k1_fe_normalize_var(&bx);
+            secp256k1_fe_mul(&b2x, &bx, &SGN_BETA);  secp256k1_fe_normalize_var(&b2x);
+            secp256k1_fe_negate(&ny3, &y3, 1);       secp256k1_fe_normalize_var(&ny3);
 
-            if (lane == 8) {
-                if (sgn_check_group8(sha_out, off8, &k0, out_match)) return 1;
-                lane = 0;
+            uint8_t xb[3][32], yb[2][32];
+            secp256k1_fe_get_b32(xb[0], &x3);
+            secp256k1_fe_get_b32(xb[1], &bx);
+            secp256k1_fe_get_b32(xb[2], &b2x);
+            secp256k1_fe_get_b32(yb[0], &y3);
+            secp256k1_fe_get_b32(yb[1], &ny3);
+
+            for (uint32_t pw = 0; pw < 3; pw++) {         /* endomorphism power */
+                for (uint32_t sy = 0; sy < 2; sy++) {     /* y-sign */
+                    memcpy(pub65 + 1,  xb[pw], 32);
+                    memcpy(pub65 + 33, yb[sy], 32);
+
+                    uint8_t sha_bytes[32];
+                    sha256_pubkey_ni(sha_bytes, pub65);
+                    for (int w = 0; w < 8; w++) {
+                        sha_out[lane][w] =
+                            ((uint32_t)sha_bytes[w * 4 + 0])
+                          | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
+                          | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
+                          | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
+                    }
+                    off8[lane] = off;
+                    var8[lane] = (pw << 1) | sy;
+                    lane++;
+
+                    if (lane == 8) {
+                        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
+                        lane = 0;
+                    }
+                }
             }
         }
     }
 
-    /* Remainder (< 8): n even but not a multiple of 8. Production uses n = 8192,
-     * so this only runs for tiny test batches. Pad by repeating the last lane —
-     * a duplicate maps to a real candidate we already meant to check, so it can
-     * never fabricate a spurious match. */
+    /* Remainder (< 8): 6*half candidates need not be a multiple of 8. Pad by
+     * repeating the last lane — a duplicate maps to a real candidate we already
+     * meant to check, so it can never fabricate a spurious match. */
     if (lane > 0) {
-        for (int p = lane; p < 8; p++) {
-            memcpy(sha_out[p], sha_out[lane - 1], sizeof(sha_out[0]));
-            off8[p] = off8[lane - 1];
+        for (int q = lane; q < 8; q++) {
+            memcpy(sha_out[q], sha_out[lane - 1], sizeof(sha_out[0]));
+            off8[q] = off8[lane - 1];
+            var8[q] = var8[lane - 1];
         }
-        if (sgn_check_group8(sha_out, off8, &k0, out_match)) return 1;
+        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
     }
 
     return 0;

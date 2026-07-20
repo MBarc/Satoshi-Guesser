@@ -105,6 +105,11 @@ pub struct SearchResult {
 /// The whole hot path lives in `sgn_search_batch` — Rust just supplies random
 /// bytes and decodes the result. The target table is loaded once per process
 /// via OnceLock.
+/// Distinct keys checked per base point inside sgn_search_batch: the 3 GLV
+/// x-images {x, beta*x, beta^2*x} times 2 y-signs {y, -y}. Must stay in sync
+/// with the candidate emission in wrapper.c's sgn_search_batch.
+const CANDIDATES_PER_BASE: u32 = 6;
+
 #[napi]
 pub fn search(
     targets: Vec<Buffer>,
@@ -133,7 +138,9 @@ pub fn search(
             sgn_search_batch(k0_bytes.as_ptr(), batch_size, &mut m as *mut CMatch)
         };
 
-        keys_checked = keys_checked.saturating_add(batch_size);
+        // sgn_search_batch checks CANDIDATES_PER_BASE distinct keys per base point
+        // (GLV endomorphism x3 images * 2 y-signs). Must match wrapper.c.
+        keys_checked = keys_checked.saturating_add(batch_size.saturating_mul(CANDIDATES_PER_BASE));
 
         if hit != 0 && m.found != 0 {
             return SearchResult {
@@ -366,6 +373,73 @@ mod tests {
             assert_eq!(mr.batch_offset, off, "reference wrong offset");
             assert_eq!(mr.hash160, target, "reference wrong hash160");
             assert_eq!(mr.priv_key, priv_bytes, "reference wrong privkey");
+        }
+    }
+
+    /// GLV endomorphism + negation: every one of the 6 variants (3 x-images x 2
+    /// y-signs) must derive to a key secp256k1 agrees unlocks the matched address.
+    /// For base key kb = k0+off and variant (p,s), the expected private key is
+    /// (-1)^s * lambda^p * kb (mod n); we install its h160 as the sole target and
+    /// require sgn_search_batch to report exactly that key. This also pins the
+    /// beta<->lambda pairing: a wrong power/sign assignment in wrapper.c makes the
+    /// reported priv mismatch here.
+    #[test]
+    fn endomorphism_variants_match_secp256k1() {
+        use rand::RngCore;
+        let _guard = TARGET_TEST_LOCK.lock().unwrap();
+
+        // Same lambda constant as wrapper.c's SGN_LAMBDA_BE (big-endian).
+        const LAMBDA_BE: [u8; 32] = [
+            0x53, 0x63, 0xad, 0x4c, 0xc0, 0x5c, 0x30, 0xe0, 0xa5, 0x26, 0x1c, 0x02, 0x88, 0x12,
+            0x64, 0x5a, 0x12, 0x2e, 0x22, 0xea, 0x20, 0x81, 0x66, 0x78, 0xdf, 0x02, 0x96, 0x7c,
+            0x1b, 0x23, 0xbd, 0x72,
+        ];
+        let lambda = Option::<Scalar>::from(Scalar::from_repr(LAMBDA_BE.into())).unwrap();
+
+        let mut rng = rand::thread_rng();
+        let n: u32 = 512;
+        let half = n / 2;
+
+        for _iter in 0..12 {
+            let mut k0 = [0u8; 32];
+            rng.fill_bytes(&mut k0);
+            k0[0] &= 0x7f;
+            let r = rng.next_u32() % (n - 1);
+            let off: u32 = if r < half { r } else { r + 1 };
+
+            let k0_scalar = Option::<Scalar>::from(Scalar::from_repr(k0.into())).unwrap();
+            let base = k0_scalar + Scalar::from(off as u64);
+
+            for pw in 0u32..3 {
+                for sy in 0u32..2 {
+                    let mut priv_s = base;
+                    for _ in 0..pw {
+                        priv_s *= lambda;
+                    }
+                    if sy == 1 {
+                        priv_s = -priv_s;
+                    }
+                    let priv_bytes: [u8; 32] = priv_s.to_bytes().into();
+                    let target = secp_h160(&priv_bytes);
+                    unsafe { sgn_set_targets(target.as_ptr(), 1) };
+
+                    let mut m: CMatch = unsafe { std::mem::zeroed() };
+                    let hit = unsafe { sgn_search_batch(k0.as_ptr(), n, &mut m as *mut CMatch) };
+                    assert_eq!(hit, 1, "variant p={pw} s={sy} off={off} not found");
+                    assert_eq!(m.found, 1);
+                    assert_eq!(m.hash160, target, "variant p={pw} s={sy} wrong hash160");
+                    assert_eq!(
+                        m.priv_key, priv_bytes,
+                        "variant p={pw} s={sy}: reported priv != (-1)^s*lambda^p*(k0+off)"
+                    );
+                    // Independent: the reported key really derives to the target.
+                    assert_eq!(
+                        secp_h160(&m.priv_key),
+                        target,
+                        "variant p={pw} s={sy}: reported priv does not unlock the matched address"
+                    );
+                }
+            }
         }
     }
 }
