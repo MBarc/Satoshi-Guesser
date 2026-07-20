@@ -34,6 +34,7 @@ fn main() {
     // since SHA-NI depends on it.
     if !cfg!(target_os = "windows") {
         build.flag("-mavx2").flag("-msha").flag("-msse4.1");
+        build.flag("-funroll-loops"); // EXPERIMENT: extra loop unrolling
     }
 
     build.compile("sgn_wrapper");
