@@ -43,8 +43,13 @@ extern "C" {
     fn sgn_set_targets(targets: *const u8, n_targets: u32);
 
     /// Unified hot path: EC + SHA-NI + 8-way RIPEMD + target lookup, all in C.
-    /// Returns 1 if a match was found (out_match populated), 0 otherwise.
+    /// Returns 1 if a match was found (out_match populated), 0 otherwise. This is
+    /// the affine batch-addition fast path.
     fn sgn_search_batch(k0_bytes: *const u8, n: u32, out_match: *mut CMatch) -> i32;
+
+    /// Reference hot path (Jacobian walk + per-point affine conversion). Same
+    /// contract as sgn_search_batch; used only to cross-validate the fast path.
+    fn sgn_search_batch_ref(k0_bytes: *const u8, n: u32, out_match: *mut CMatch) -> i32;
 }
 
 #[napi]
@@ -177,6 +182,11 @@ pub fn derive_hash160(priv_key: Buffer) -> Result<Buffer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process-global target table via
+    /// sgn_set_targets (cargo runs tests on parallel threads in one process).
+    static TARGET_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn k256_xy_chain(k0_bytes: &[u8; 32], n: usize) -> Vec<u8> {
         let k0 = Option::<Scalar>::from(Scalar::from_repr((*k0_bytes).into()))
@@ -281,6 +291,7 @@ mod tests {
     /// the corresponding h160 to the target table and confirming match data.
     #[test]
     fn search_batch_matches_secp256k1_reference() {
+        let _guard = TARGET_TEST_LOCK.lock().unwrap();
         // Pick a fixed k0 and an offset i. Compute reference h160(k0+i) via
         // secp256k1, install it as the only target, run sgn_search_batch with
         // n large enough to include offset i, expect a match at i.
@@ -306,5 +317,55 @@ mod tests {
         assert_eq!(m.batch_offset, target_offset);
         assert_eq!(m.hash160, target_h160);
         assert_eq!(m.priv_key, priv_bytes);
+    }
+
+    /// The affine fast path (sgn_search_batch) and the Jacobian reference
+    /// (sgn_search_batch_ref) must agree with secp256k1 for random k0 across the
+    /// whole batch. For each iteration we install a known target h160(k0+off) and
+    /// require both paths to find it at the correct offset, hash, and private key.
+    ///
+    /// `off` is drawn from the offsets both paths cover: the affine path skips
+    /// the center key (offset == half) and instead reaches offset == n, so we
+    /// exclude `half` and stay within [0, n). This exercises both the "+"
+    /// (off > half) and "-" (off < half) branches of the affine derivation.
+    #[test]
+    fn affine_matches_reference_over_random_k0() {
+        use rand::RngCore;
+        let _guard = TARGET_TEST_LOCK.lock().unwrap();
+
+        let mut rng = rand::thread_rng();
+        let n: u32 = 512; // even and a multiple of 8
+        let half = n / 2;
+
+        for _iter in 0..64 {
+            let mut k0 = [0u8; 32];
+            rng.fill_bytes(&mut k0);
+            k0[0] &= 0x7f; // keep k0 < 2^255: in range, nonzero, and k0+off never wraps
+
+            // Draw off from [0, n) \ {half}: map r in [0, n-1) skipping the center.
+            let r = rng.next_u32() % (n - 1);
+            let off: u32 = if r < half { r } else { r + 1 };
+
+            let k0_scalar = Option::<Scalar>::from(Scalar::from_repr(k0.into())).unwrap();
+            let priv_scalar = k0_scalar + Scalar::from(off as u64);
+            let priv_bytes: [u8; 32] = priv_scalar.to_bytes().into();
+            let target = secp_h160(&priv_bytes);
+            unsafe { sgn_set_targets(target.as_ptr(), 1) };
+
+            let mut m: CMatch = unsafe { std::mem::zeroed() };
+            let hit = unsafe { sgn_search_batch(k0.as_ptr(), n, &mut m as *mut CMatch) };
+            assert_eq!(hit, 1, "affine path missed off={off} k0={}", hex::encode(k0));
+            assert_eq!(m.found, 1);
+            assert_eq!(m.batch_offset, off, "affine wrong offset");
+            assert_eq!(m.hash160, target, "affine wrong hash160");
+            assert_eq!(m.priv_key, priv_bytes, "affine wrong privkey");
+
+            let mut mr: CMatch = unsafe { std::mem::zeroed() };
+            let hitr = unsafe { sgn_search_batch_ref(k0.as_ptr(), n, &mut mr as *mut CMatch) };
+            assert_eq!(hitr, 1, "reference path missed off={off}");
+            assert_eq!(mr.batch_offset, off, "reference wrong offset");
+            assert_eq!(mr.hash160, target, "reference wrong hash160");
+            assert_eq!(mr.priv_key, priv_bytes, "reference wrong privkey");
+        }
     }
 }
