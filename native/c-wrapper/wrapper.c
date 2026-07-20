@@ -1495,15 +1495,11 @@ int sgn_search_batch(
                     memcpy(pub65 + 1,  xb[pw], 32);
                     memcpy(pub65 + 33, yb[sy], 32);
 
-                    uint8_t sha_bytes[32];
-                    sha256_pubkey_ni(sha_bytes, pub65);
-                    for (int w = 0; w < 8; w++) {
-                        sha_out[lane][w] =
-                            ((uint32_t)sha_bytes[w * 4 + 0])
-                          | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
-                          | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
-                          | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
-                    }
+                    /* store_state writes the digest as big-endian word bytes;
+                     * read back as native uint32 that is exactly the RIPEMD LE
+                     * message word, so write straight into sha_out[lane] and skip
+                     * the per-candidate repack. */
+                    sha256_pubkey_ni((uint8_t*)sha_out[lane], pub65);
                     off8[lane] = off;
                     var8[lane] = (pw << 1) | sy;
                     lane++;
