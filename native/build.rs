@@ -34,6 +34,10 @@ fn main() {
     // since SHA-NI depends on it.
     if !cfg!(target_os = "windows") {
         build.flag("-mavx2").flag("-msha").flag("-msse4.1");
+        // -mtune is scheduling-only (no new ISA), so the binary still runs on
+        // every runner; it just biases instruction scheduling toward Zen3, the
+        // predominant free-runner CPU (AMD EPYC 7763). EXPERIMENT: measure per-CPU.
+        build.flag("-mtune=znver3");
     }
 
     build.compile("sgn_wrapper");
