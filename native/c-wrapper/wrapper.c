@@ -76,6 +76,17 @@ static SGN_THREAD_LOCAL secp256k1_gej g_chain[SGN_MAX_BATCH];
 static SGN_THREAD_LOCAL secp256k1_fe  g_zinv[SGN_MAX_BATCH];
 static SGN_THREAD_LOCAL secp256k1_fe  g_zacc[SGN_MAX_BATCH];
 
+/* Precomputed affine multiples of G used by the affine-batch search path:
+ * g_gn[j] = (j+1)*G for j = 0..SGN_HALF_MAX-1. Constant for the whole process
+ * but stored per-thread (like the scratch above) so first-touch init is
+ * race-free without a pthread_once. g_dx holds the per-batch x-difference
+ * denominators, batch-inverted in place. */
+#define SGN_HALF_MAX (SGN_MAX_BATCH / 2)
+static SGN_THREAD_LOCAL secp256k1_fe g_gnx[SGN_HALF_MAX];
+static SGN_THREAD_LOCAL secp256k1_fe g_gny[SGN_HALF_MAX];
+static SGN_THREAD_LOCAL secp256k1_fe g_dx[SGN_HALF_MAX];
+static SGN_THREAD_LOCAL int g_gn_built;
+
 /* The ecmult_gen context is per-thread; built lazily on first call.
  * `built` is a tristate-as-int, but C11 _Thread_local zero-initializes,
  * so the first call sees built==0 and runs context_build. */
@@ -1006,7 +1017,12 @@ static inline void sgn_ripemd_8way_inline(
     }
 }
 
-int sgn_search_batch(
+/* Reference implementation: Jacobian add-G walk + batch Z-inversion + per-point
+ * affine conversion. Retained as the cross-validation oracle for the affine
+ * fast path (see tests) and as its exact fallback for the (cryptographically
+ * unreachable) degenerate cases the fast path cannot handle. Non-static so the
+ * Rust test suite can call it directly to cross-validate the affine fast path. */
+int sgn_search_batch_ref(
     const uint8_t* k0_bytes,
     uint32_t n,
     sgn_match_t* out_match
@@ -1178,6 +1194,282 @@ int sgn_search_batch(
             secp256k1_scalar_get_b32(out_match->priv_key, &priv);
             return 1;
         }
+    }
+
+    return 0;
+}
+
+/* ===============================================================
+ * Affine batch-addition fast path
+ *
+ * The reference path above walks k0, k0+1, ... in Jacobian form (one
+ * gej_add_ge_var per step, ~8M+3S) and then converts every point to affine
+ * (~3M+1S each) — ~14M+4S of field work per candidate before hashing.
+ *
+ * This path exploits that we always add the SAME point G to a common base.
+ * Compute the center C = (k0+half)*G once, then every candidate is C ± (j+1)*G
+ * for a precomputed constant (j+1)*G. Because the base C is shared and the
+ * offsets are constants, ALL half denominators (gnx[j]-Cx) are known before any
+ * addition, so they collapse into ONE Montgomery batch inversion — and the "+"
+ * and "-" points for a given j reuse the same inverse. Field work drops to
+ * ~3-4M+1S per candidate (~4x fewer multiplies on the EC stage).
+ *
+ * Coverage: candidate at batch offset `off` has private key k0 + off:
+ *   minus j -> off = half - (j+1)   -> keys k0 .. k0+half-1
+ *   plus  j -> off = half + (j+1)   -> keys k0+half+1 .. k0+2*half
+ * i.e. exactly n = 2*half consecutive keys centered on k0+half (the center key
+ * itself is skipped — irrelevant for a uniform random search). The reported
+ * priv = k0 + off matches the reference contract exactly, so the match/offset
+ * semantics and the existing tests are unchanged.
+ * =============================================================== */
+
+/* Transpose 8 lanes of SHA-256 output into the 8-way RIPEMD input layout, run
+ * RIPEMD-160, and check each hash160 against the target table. sha_out[lane][w]
+ * holds lane's digest as 8 little-endian words. off[lane] is the batch offset
+ * (priv = k0 + off) for that lane. Returns 1 with out_match filled on a hit. */
+static inline int sgn_check_group8(
+    uint32_t sha_out[8][8],
+    const uint32_t off[8],
+    const secp256k1_scalar* k0,
+    sgn_match_t* out_match
+) {
+    __m256i a[8];
+    for (int j = 0; j < 8; j++) {
+        a[j] = _mm256_loadu_si256((const __m256i*)sha_out[j]);
+    }
+    __m256i X8[8];
+    {
+        __m256i s0 = _mm256_unpacklo_epi32(a[0], a[1]);
+        __m256i s1 = _mm256_unpackhi_epi32(a[0], a[1]);
+        __m256i s2 = _mm256_unpacklo_epi32(a[2], a[3]);
+        __m256i s3 = _mm256_unpackhi_epi32(a[2], a[3]);
+        __m256i s4 = _mm256_unpacklo_epi32(a[4], a[5]);
+        __m256i s5 = _mm256_unpackhi_epi32(a[4], a[5]);
+        __m256i s6 = _mm256_unpacklo_epi32(a[6], a[7]);
+        __m256i s7 = _mm256_unpackhi_epi32(a[6], a[7]);
+        __m256i u0 = _mm256_unpacklo_epi64(s0, s2);
+        __m256i u1 = _mm256_unpackhi_epi64(s0, s2);
+        __m256i u2 = _mm256_unpacklo_epi64(s1, s3);
+        __m256i u3 = _mm256_unpackhi_epi64(s1, s3);
+        __m256i u4 = _mm256_unpacklo_epi64(s4, s6);
+        __m256i u5 = _mm256_unpackhi_epi64(s4, s6);
+        __m256i u6 = _mm256_unpacklo_epi64(s5, s7);
+        __m256i u7 = _mm256_unpackhi_epi64(s5, s7);
+        X8[0] = _mm256_permute2x128_si256(u0, u4, 0x20);
+        X8[1] = _mm256_permute2x128_si256(u1, u5, 0x20);
+        X8[2] = _mm256_permute2x128_si256(u2, u6, 0x20);
+        X8[3] = _mm256_permute2x128_si256(u3, u7, 0x20);
+        X8[4] = _mm256_permute2x128_si256(u0, u4, 0x31);
+        X8[5] = _mm256_permute2x128_si256(u1, u5, 0x31);
+        X8[6] = _mm256_permute2x128_si256(u2, u6, 0x31);
+        X8[7] = _mm256_permute2x128_si256(u3, u7, 0x31);
+    }
+
+    uint8_t h160_pack[8 * 20];
+    sgn_ripemd_8way_inline(X8, h160_pack);
+
+    for (int j = 0; j < 8; j++) {
+        const uint8_t* h = h160_pack + (size_t)j * 20;
+        if (sgn_target_match(h)) {
+            out_match->found = 1;
+            out_match->batch_offset = off[j];
+            memcpy(out_match->hash160, h, 20);
+            secp256k1_scalar offset_scalar;
+            secp256k1_scalar_set_int(&offset_scalar, off[j]);
+            secp256k1_scalar priv;
+            secp256k1_scalar_add(&priv, k0, &offset_scalar);
+            secp256k1_scalar_get_b32(out_match->priv_key, &priv);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Build the per-thread affine table g_gn[j] = (j+1)*G for j=0..SGN_HALF_MAX-1.
+ * One inversion, amortized over the whole table via Montgomery batch invert.
+ * Reuses g_chain/g_zacc/g_zinv scratch (safe: only ever called before a search
+ * on the same thread). Idempotent via g_gn_built. */
+static void sgn_build_gn_table(void) {
+    if (g_gn_built) return;
+
+    secp256k1_gej_set_ge(&g_chain[0], &secp256k1_ge_const_g);   /* 1*G */
+    for (uint32_t j = 1; j < SGN_HALF_MAX; j++) {
+        secp256k1_gej_add_ge_var(&g_chain[j], &g_chain[j - 1],
+                                 &secp256k1_ge_const_g, NULL);
+    }
+
+    g_zacc[0] = g_chain[0].z;
+    for (uint32_t j = 1; j < SGN_HALF_MAX; j++) {
+        secp256k1_fe_mul(&g_zacc[j], &g_zacc[j - 1], &g_chain[j].z);
+    }
+    secp256k1_fe acc_inv;
+    secp256k1_fe_inv(&acc_inv, &g_zacc[SGN_HALF_MAX - 1]);
+    for (uint32_t j = SGN_HALF_MAX - 1; j > 0; j--) {
+        secp256k1_fe_mul(&g_zinv[j], &acc_inv, &g_zacc[j - 1]);
+        secp256k1_fe_mul(&acc_inv, &acc_inv, &g_chain[j].z);
+    }
+    g_zinv[0] = acc_inv;
+
+    for (uint32_t j = 0; j < SGN_HALF_MAX; j++) {
+        secp256k1_fe z2, z3, x, y;
+        secp256k1_fe_sqr(&z2, &g_zinv[j]);
+        secp256k1_fe_mul(&z3, &z2, &g_zinv[j]);
+        secp256k1_fe_mul(&x, &g_chain[j].x, &z2);
+        secp256k1_fe_mul(&y, &g_chain[j].y, &z3);
+        secp256k1_fe_normalize_var(&x);
+        secp256k1_fe_normalize_var(&y);
+        g_gnx[j] = x;
+        g_gny[j] = y;
+    }
+
+    g_gn_built = 1;
+}
+
+int sgn_search_batch(
+    const uint8_t* k0_bytes,
+    uint32_t n,
+    sgn_match_t* out_match
+) {
+    out_match->found = 0;
+    out_match->batch_offset = 0;
+    memset(out_match->priv_key, 0, 32);
+    memset(out_match->hash160, 0, 20);
+
+    /* Needs a positive, even, in-range n to split into half ± pairs. Odd/oversized
+     * n (production never uses either) defers to the reference implementation. */
+    if (n == 0 || n > SGN_MAX_BATCH || (n & 1u)) {
+        return sgn_search_batch_ref(k0_bytes, n, out_match);
+    }
+    const uint32_t half = n / 2;   /* <= SGN_HALF_MAX */
+
+    if (!g_gen_state.built) {
+        secp256k1_ecmult_gen_context_build(&g_gen_state.ctx);
+        g_gen_state.built = 1;
+    }
+    sgn_build_gn_table();
+
+    secp256k1_scalar k0;
+    int overflow = 0;
+    secp256k1_scalar_set_b32(&k0, k0_bytes, &overflow);
+    if (overflow || secp256k1_scalar_is_zero(&k0)) return 0;
+
+    /* Center scalar c = k0 + half; center point C = c*G. */
+    secp256k1_scalar half_scalar, c;
+    secp256k1_scalar_set_int(&half_scalar, half);
+    secp256k1_scalar_add(&c, &k0, &half_scalar);
+
+    secp256k1_gej Cj;
+    secp256k1_ecmult_gen(&g_gen_state.ctx, &Cj, &c);
+
+    /* C -> affine (Cx, Cy). One inversion per batch (negligible next to n hashes). */
+    secp256k1_fe zinv, z2, z3, Cx, Cy;
+    secp256k1_fe_inv(&zinv, &Cj.z);
+    secp256k1_fe_sqr(&z2, &zinv);
+    secp256k1_fe_mul(&z3, &z2, &zinv);
+    secp256k1_fe_mul(&Cx, &Cj.x, &z2);
+    secp256k1_fe_mul(&Cy, &Cj.y, &z3);
+    secp256k1_fe_normalize_var(&Cx);
+    secp256k1_fe_normalize_var(&Cy);
+
+    secp256k1_fe negCx, negCy;
+    secp256k1_fe_negate(&negCx, &Cx, 1);   /* Cx, Cy normalized -> magnitude 1 */
+    secp256k1_fe_negate(&negCy, &Cy, 1);
+
+    /* dx[j] = gnx[j] - Cx, then one Montgomery batch inversion of all half of them. */
+    for (uint32_t j = 0; j < half; j++) {
+        secp256k1_fe d = g_gnx[j];
+        secp256k1_fe_add(&d, &negCx);
+        if (secp256k1_fe_normalizes_to_zero_var(&d)) {
+            /* C == ±(j+1)*G: slope undefined. Unreachable for random k0 outside
+             * a ~2^-243 event; hand the whole batch to the reference path. */
+            return sgn_search_batch_ref(k0_bytes, n, out_match);
+        }
+        g_dx[j] = d;
+    }
+    g_zacc[0] = g_dx[0];
+    for (uint32_t j = 1; j < half; j++) {
+        secp256k1_fe_mul(&g_zacc[j], &g_zacc[j - 1], &g_dx[j]);
+    }
+    secp256k1_fe acc;
+    secp256k1_fe_inv(&acc, &g_zacc[half - 1]);
+    for (uint32_t j = half - 1; j > 0; j--) {
+        secp256k1_fe inv_j;
+        secp256k1_fe_mul(&inv_j, &acc, &g_zacc[j - 1]);   /* 1/dx[j] */
+        secp256k1_fe_mul(&acc, &acc, &g_dx[j]);           /* strip dx[j] */
+        g_dx[j] = inv_j;
+    }
+    g_dx[0] = acc;   /* g_dx[j] now holds 1/(gnx[j]-Cx) */
+
+    /* Stream candidates through SHA-NI, feeding every 8 into the 8-way RIPEMD
+     * group check. For each j emit the minus point (sign 0) then plus (sign 1). */
+    uint8_t pub65[65];
+    pub65[0] = 0x04;
+    uint32_t sha_out[8][8];
+    uint32_t off8[8];
+    int lane = 0;
+
+    for (uint32_t j = 0; j < half; j++) {
+        const secp256k1_fe* inv = &g_dx[j];
+        for (int sign = 0; sign < 2; sign++) {   /* 0 = C - (j+1)G, 1 = C + (j+1)G */
+            secp256k1_fe num;                     /* (±gny[j]) - Cy */
+            if (sign) {
+                num = g_gny[j];
+                secp256k1_fe_add(&num, &negCy);
+            } else {
+                secp256k1_fe_negate(&num, &g_gny[j], 1);
+                secp256k1_fe_add(&num, &negCy);
+            }
+            secp256k1_fe lam;
+            secp256k1_fe_mul(&lam, &num, inv);
+
+            /* x3 = lam^2 - Cx - gnx[j] */
+            secp256k1_fe x3, neg_gnx;
+            secp256k1_fe_sqr(&x3, &lam);
+            secp256k1_fe_add(&x3, &negCx);
+            secp256k1_fe_negate(&neg_gnx, &g_gnx[j], 1);
+            secp256k1_fe_add(&x3, &neg_gnx);
+            secp256k1_fe_normalize_var(&x3);
+
+            /* y3 = lam*(Cx - x3) - Cy */
+            secp256k1_fe y3, cx_minus_x3;
+            secp256k1_fe_negate(&cx_minus_x3, &x3, 1);
+            secp256k1_fe_add(&cx_minus_x3, &Cx);
+            secp256k1_fe_mul(&y3, &lam, &cx_minus_x3);
+            secp256k1_fe_add(&y3, &negCy);
+            secp256k1_fe_normalize_var(&y3);
+
+            secp256k1_fe_get_b32(pub65 + 1,  &x3);
+            secp256k1_fe_get_b32(pub65 + 33, &y3);
+
+            uint8_t sha_bytes[32];
+            sha256_pubkey_ni(sha_bytes, pub65);
+            for (int w = 0; w < 8; w++) {
+                sha_out[lane][w] =
+                    ((uint32_t)sha_bytes[w * 4 + 0])
+                  | ((uint32_t)sha_bytes[w * 4 + 1] << 8)
+                  | ((uint32_t)sha_bytes[w * 4 + 2] << 16)
+                  | ((uint32_t)sha_bytes[w * 4 + 3] << 24);
+            }
+            off8[lane] = sign ? (half + j + 1) : (half - j - 1);
+            lane++;
+
+            if (lane == 8) {
+                if (sgn_check_group8(sha_out, off8, &k0, out_match)) return 1;
+                lane = 0;
+            }
+        }
+    }
+
+    /* Remainder (< 8): n even but not a multiple of 8. Production uses n = 8192,
+     * so this only runs for tiny test batches. Pad by repeating the last lane —
+     * a duplicate maps to a real candidate we already meant to check, so it can
+     * never fabricate a spurious match. */
+    if (lane > 0) {
+        for (int p = lane; p < 8; p++) {
+            memcpy(sha_out[p], sha_out[lane - 1], sizeof(sha_out[0]));
+            off8[p] = off8[lane - 1];
+        }
+        if (sgn_check_group8(sha_out, off8, &k0, out_match)) return 1;
     }
 
     return 0;
