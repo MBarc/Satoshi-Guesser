@@ -1440,10 +1440,15 @@ int sgn_search_batch(
      * three GLV x-images {x, beta*x, beta^2*x} times both y-signs {y, -y}. */
     uint8_t pub65[65];
     pub65[0] = 0x04;
-    uint32_t sha_out[8][8];
-    uint32_t off8[8];
-    uint32_t var8[8];
-    int lane = 0;
+    /* Double-buffered: a full group's RIPEMD (vector ports) is injected mid-way
+     * through the NEXT group's SHA-NI (SHA port). The two use different execution
+     * ports, so the out-of-order engine runs them concurrently and the vector
+     * RIPEMD hides under the SHA-port-bound SHA-NI stream. */
+    uint32_t sha_out[2][8][8];
+    uint32_t off8[2][8];
+    uint32_t var8[2][8];
+    int cur = 0, lane = 0;
+    int pending = 0, pbuf = 0;
 
     for (uint32_t j = 0; j < half; j++) {
         const secp256k1_fe* inv = &g_dx[j];
@@ -1499,13 +1504,26 @@ int sgn_search_batch(
                      * read back as native uint32 that is exactly the RIPEMD LE
                      * message word, so write straight into sha_out[lane] and skip
                      * the per-candidate repack. */
-                    sha256_pubkey_ni((uint8_t*)sha_out[lane], pub65);
-                    off8[lane] = off;
-                    var8[lane] = (pw << 1) | sy;
+                    sha256_pubkey_ni((uint8_t*)sha_out[cur][lane], pub65);
+                    off8[cur][lane] = off;
+                    var8[cur][lane] = (pw << 1) | sy;
                     lane++;
 
+                    /* Inject the previous full group's RIPEMD here — surrounded
+                     * by this group's SHA-NI calls, so the vector-port RIPEMD
+                     * overlaps the SHA-port SHA-NI on the out-of-order engine. */
+                    if (lane == 4 && pending) {
+                        if (sgn_check_group8(sha_out[pbuf], off8[pbuf], var8[pbuf],
+                                             &k0, &lambda, out_match)) return 1;
+                        pending = 0;
+                    }
+
                     if (lane == 8) {
-                        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
+                        /* Defer this group's RIPEMD to mid-next-group; swap buffers.
+                         * The buffer we swap to was already drained at lane 4. */
+                        pending = 1;
+                        pbuf = cur;
+                        cur = 1 - cur;
                         lane = 0;
                     }
                 }
@@ -1513,16 +1531,22 @@ int sgn_search_batch(
         }
     }
 
-    /* Remainder (< 8): 6*half candidates need not be a multiple of 8. Pad by
-     * repeating the last lane — a duplicate maps to a real candidate we already
-     * meant to check, so it can never fabricate a spurious match. */
+    /* Drain: the last deferred full group, then any partial current group
+     * (padded by repeating its last lane — a duplicate maps to a real candidate
+     * we already meant to check, so it can never fabricate a spurious match). */
+    if (pending) {
+        if (sgn_check_group8(sha_out[pbuf], off8[pbuf], var8[pbuf],
+                             &k0, &lambda, out_match)) return 1;
+        pending = 0;
+    }
     if (lane > 0) {
         for (int q = lane; q < 8; q++) {
-            memcpy(sha_out[q], sha_out[lane - 1], sizeof(sha_out[0]));
-            off8[q] = off8[lane - 1];
-            var8[q] = var8[lane - 1];
+            memcpy(sha_out[cur][q], sha_out[cur][lane - 1], sizeof(sha_out[cur][0]));
+            off8[cur][q] = off8[cur][lane - 1];
+            var8[cur][q] = var8[cur][lane - 1];
         }
-        if (sgn_check_group8(sha_out, off8, var8, &k0, &lambda, out_match)) return 1;
+        if (sgn_check_group8(sha_out[cur], off8[cur], var8[cur],
+                             &k0, &lambda, out_match)) return 1;
     }
 
     return 0;
